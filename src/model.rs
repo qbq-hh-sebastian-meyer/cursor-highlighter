@@ -122,6 +122,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub outline_only: bool,
     pub distinct_click_colors: bool,
     pub shortcut: Shortcut,
     pub activation_mode: ActivationMode,
@@ -137,6 +138,7 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            outline_only: false,
             distinct_click_colors: false,
             shortcut: Shortcut::default(),
             activation_mode: ActivationMode::default(),
@@ -370,6 +372,7 @@ pub fn render(
     let center = size as f32 / 2.0;
     let rx = diameter as f32 * (1.0 - 0.04 * amount) / 2.0;
     let ry = diameter as f32 * (1.0 - 0.18 * amount) / 2.0;
+    let outline_width = 5.0_f32.min(rx.min(ry) * 0.8);
     let brightness = 1.0 - 0.35 * amount;
     let mut pixels = vec![0; size * size * 4];
     for y in 0..size {
@@ -392,7 +395,17 @@ pub fn render(
                 for sx in 0..4 {
                     let dx = (x as f32 + (sx as f32 + 0.5) / 4.0 - center) / rx;
                     let dy = (y as f32 + (sy as f32 + 0.5) / 4.0 - center) / ry;
-                    covered += u32::from(dx * dx + dy * dy <= 1.0);
+                    let outer = dx * dx + dy * dy <= 1.0;
+                    let inner = if settings.outline_only {
+                        let inner_rx = rx - outline_width;
+                        let inner_ry = ry - outline_width;
+                        let inner_dx = (x as f32 + (sx as f32 + 0.5) / 4.0 - center) / inner_rx;
+                        let inner_dy = (y as f32 + (sy as f32 + 0.5) / 4.0 - center) / inner_ry;
+                        inner_dx * inner_dx + inner_dy * inner_dy <= 1.0
+                    } else {
+                        false
+                    };
+                    covered += u32::from(outer && !inner);
                 }
             }
             let alpha = (255.0 * settings.opacity as f32 / 100.0 * covered as f32 / 16.0).round();
@@ -419,6 +432,7 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.outline_only);
         assert!(!value.distinct_click_colors);
         assert_eq!(value.shortcut, Shortcut::default());
         assert_eq!(value.activation_mode, ActivationMode::Toggle);
@@ -635,6 +649,7 @@ mod tests {
                 auto_hide,
                 scale_with_dpi,
                 start_minimized: true,
+                outline_only: true,
                 distinct_click_colors: true,
                 activation_mode: ActivationMode::Hold,
                 shortcut: Shortcut::parse("Ctrl + Shift + F9").unwrap(),
@@ -647,6 +662,7 @@ mod tests {
                 assert_eq!(settings.auto_hide, auto_hide);
                 assert_eq!(settings.scale_with_dpi, scale_with_dpi);
                 assert!(settings.start_minimized);
+                assert!(settings.outline_only);
                 assert!(settings.distinct_click_colors);
                 assert_eq!(settings.activation_mode, ActivationMode::Hold);
                 assert_eq!(
@@ -677,7 +693,7 @@ mod tests {
                         .as_object()
                         .unwrap()
                         .len(),
-                    10
+                    11
                 );
                 settings.diameter = 97;
                 settings.opacity = 31;
@@ -738,6 +754,7 @@ mod tests {
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         settings.opacity = 65;
+        settings.outline_only = true;
         settings.scale_with_dpi = false;
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
@@ -946,5 +963,132 @@ mod tests {
                 assert_eq!(pressed[near_top], 0);
             }
         }
+    }
+
+    #[test]
+    fn outline_render_keeps_interior_clear_and_deforms_with_click_feedback() {
+        for diameter in [24, 80, 240] {
+            for opacity in [5, 35, 80] {
+                let settings = Settings {
+                    diameter,
+                    opacity,
+                    outline_only: true,
+                    ..Settings::default()
+                };
+                let normal = render(&settings, 0.0, 96, [0.0; 2]).unwrap();
+                let pressed = render(&settings, 1.0, 96, [0.0; 2]).unwrap();
+                let rgb = settings.rgb().unwrap();
+                let size = diameter as usize + 4;
+                let center = size / 2;
+                let center_pixel = (center * size + center) * 4;
+                let ring_x = center + (diameter as f32 / 2.0 - 2.5).round() as usize;
+                let ring_pixel = (center * size + ring_x) * 4;
+                let pressed_ring_x = center + (diameter as f32 * 0.96 / 2.0 - 2.5).round() as usize;
+                let pressed_ring_pixel = (center * size + pressed_ring_x) * 4;
+                let inner_x = center + (diameter as f32 * 0.2).round() as usize;
+                let inner_pixel = (center * size + inner_x) * 4;
+
+                assert_eq!(normal[center_pixel + 3], 0);
+                assert_eq!(pressed[center_pixel + 3], 0);
+                assert!(normal[ring_pixel + 3] > 0);
+                assert!(pressed[pressed_ring_pixel + 3] > 0);
+                assert_eq!(normal[inner_pixel + 3], 0);
+                assert_eq!(pressed[inner_pixel + 3], 0);
+                for c in 0..3 {
+                    let expected =
+                        (rgb[2 - c] as f32 * 0.65 * pressed[pressed_ring_pixel + 3] as f32 / 255.0)
+                            .round();
+                    assert!((pressed[pressed_ring_pixel + c] as f32 - expected).abs() <= 1.0);
+                }
+                for pixel in normal
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .chain(pressed.as_chunks::<4>().0.iter())
+                {
+                    assert!(pixel[..3].iter().all(|&channel| channel <= pixel[3]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn outline_render_tracks_dpi_scaling() {
+        let settings = Settings {
+            diameter: 80,
+            outline_only: true,
+            scale_with_dpi: true,
+            ..Settings::default()
+        };
+        for dpi in [48, 96, 120, 144, 192] {
+            let diameter = settings.pixel_diameter(dpi).unwrap();
+            for feedback in [0.0, 0.5, 1.0] {
+                let scaled = render(&settings, feedback, dpi, [0.0; 2]).unwrap();
+                let physical = render(
+                    &Settings {
+                        diameter,
+                        outline_only: true,
+                        ..Settings::default()
+                    },
+                    feedback,
+                    96,
+                    [0.0; 2],
+                )
+                .unwrap();
+                assert_eq!(scaled, physical);
+                let size = diameter as usize + 4;
+                let center = (size / 2 * size + size / 2) * 4;
+                assert_eq!(&scaled[center..center + 4], &[0; 4]);
+                assert!(scaled.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0));
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_click_colors_apply_to_outline_without_changing_alpha() {
+        let settings = Settings {
+            outline_only: true,
+            distinct_click_colors: true,
+            ..Settings::default()
+        };
+        let classic = render(&settings, 1.0, 96, [0.0; 2]).unwrap();
+        let left = render(&settings, 1.0, 96, [1.0, 0.0]).unwrap();
+        let right = render(&settings, 1.0, 96, [0.0, 1.0]).unwrap();
+        let both = render(&settings, 1.0, 96, [1.0; 2]).unwrap();
+        let size = settings.diameter as usize + 4;
+        let center = size / 2;
+        let left_pixel = (center * size + center - 36) * 4;
+        let right_pixel = (center * size + center + 35) * 4;
+        for (offset, pixels, tint) in [
+            (left_pixel, &left, [255.0, 136.0, 51.0]),
+            (right_pixel, &right, [51.0, 102.0, 255.0]),
+        ] {
+            assert!(pixels[offset + 3] > 0);
+            for channel in 0..3 {
+                let expected = tint[channel] * 0.65 * pixels[offset + 3] as f32 / 255.0;
+                assert!((pixels[offset + channel] as f32 - expected).abs() <= 1.0);
+            }
+        }
+        assert_eq!(
+            &both[left_pixel..left_pixel + 4],
+            &left[left_pixel..left_pixel + 4]
+        );
+        assert_eq!(
+            &both[right_pixel..right_pixel + 4],
+            &right[right_pixel..right_pixel + 4]
+        );
+        for image in [&left, &right, &both] {
+            for (pixel, original) in image
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(classic.as_chunks::<4>().0)
+            {
+                assert_eq!(pixel[3], original[3]);
+                assert!(pixel[..3].iter().all(|&channel| channel <= pixel[3]));
+            }
+        }
+        let center_pixel = (center * size + center) * 4;
+        assert_eq!(&both[center_pixel..center_pixel + 4], &[0; 4]);
     }
 }

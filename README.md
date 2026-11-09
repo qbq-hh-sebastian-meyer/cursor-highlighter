@@ -36,8 +36,8 @@ machine or use the MSVC cross-compilation instructions below.
   (`#FFD43B`) halo at 20% opacity, or **Live demo** for a stronger 120-unit orange
   (`#FF922B`) halo at 50% opacity. Both are also available from the tray menu
   without opening Settings. Presets replace size, opacity, and color immediately,
-  but preserve enabled, distinct click colors, auto-hide, DPI sizing, startup, shortcut, and activation
-  mode choices. Size uses the selected
+  but preserve enabled, outline, distinct click colors, auto-hide, DPI sizing,
+  startup, shortcut, and activation mode choices. Size uses the selected
   physical or logical units. You can still customize all three controls
   afterward; the resulting values are saved normally, with no preset field.
 - **Size** adjusts the diameter from 24 to 240 physical screen pixels by default.
@@ -50,6 +50,9 @@ machine or use the MSVC cross-compilation instructions below.
   change when switching modes. Windows scaling, not measured panel dimensions,
   determines the result.
 - **Opacity** adjusts transparency from 5% to 80%.
+- **Outline only** draws an outline up to 5 physical pixels thick instead of
+  filling the halo, keeping content under the cursor readable. It is off by
+  default.
 - **Choose...** previews the current halo color on the button, with contrasting
   text, and opens the standard Windows color picker.
 - **Click feedback:** left, right, and middle presses slightly squash the halo and
@@ -96,7 +99,7 @@ machine or use the MSVC cross-compilation instructions below.
   only minimizes Settings.
 
 Defaults: 80 physical px diameter (DPI scaling off), yellow (`#FFD43B`),
-35% opacity, auto-hide off.
+35% opacity, filled halo, auto-hide off.
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
@@ -212,9 +215,10 @@ Unit tests cover C# settings compatibility, shortcut parsing and validation,
 activation-mode visibility and chord release, atomic persistence,
 presentation preset values, persistence and subsequent manual customization,
 click/release/overlapping-button timing, idle/typing fade timing and movement
-restoration, auto-hide persistence and backward-compatible defaults, alpha, color
-darkening, deformation, independent left/right color timing, optional/simultaneous
-click colors, and premultiplied rendering across sizes and opacity values.
+restoration, auto-hide persistence and backward-compatible defaults, filled and
+outline alpha, color darkening, deformation, independent left/right color timing,
+optional/simultaneous click colors, and premultiplied rendering across sizes and
+opacity values.
 DPI tests cover
 opt-in defaults, persistence in both modes, fractional-scale rounding, simulated
 monitor transitions, larger scaled bitmaps, and negative-coordinate centering.
@@ -234,8 +238,8 @@ notification icon, hook installation, custom window icons, click-through and
 no-activation behavior, cursor centering, topmost placement, native controls,
 hotkey dispatch, optional keyboard observer lifecycle, idle/typing hiding and
 mouse-movement restoration, settings persistence, DPI-scaled control layout,
-live DPI sizing checkbox changes, and
-actual desktop compositing for both the normal and pressed halo. It uses an isolated
+live DPI sizing checkbox changes, and actual desktop compositing for both halo
+styles in normal and pressed states. It uses an isolated
 temporary settings file, never overwriting your settings. Close the running app
 first, keep the desktop unlocked, and leave the cursor still over a static area
 while running this check. It calls the mouse-observer callback directly to check
@@ -255,7 +259,9 @@ Before a presentation, also verify interactively:
 `windows-sys` provides direct Win32 bindings; there is no GUI framework.
 `src\desktop.rs` owns the native windows, controls, tray, timers, hook, color
 dialog, shortcut, and GDI resources on one UI thread. `src\model.rs` contains
-settings, click/auto-hide timing, and anti-aliased premultiplied BGRA rendering.
+settings, click/auto-hide timing, and anti-aliased premultiplied BGRA rendering. The
+optional outline is formed by subtracting an inset ellipse from the filled
+shape, preserving the existing alpha, color, and click-feedback behavior.
 `src\startup.rs` owns the current-user launch-at-login registry entry.
 
 The halo is a per-pixel-alpha, click-through, non-activating layered topmost

@@ -45,6 +45,7 @@ const ID_LAUNCH_AT_LOGIN: u16 = 116;
 const ID_SHORTCUT: u16 = 117;
 const ID_APPLY_SHORTCUT: u16 = 118;
 const ID_HOLD: u16 = 119;
+const ID_OUTLINE: u16 = 121;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -238,7 +239,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(795),
+                bottom: self.scale(830),
                 ..zeroed()
             };
             check(
@@ -470,14 +471,24 @@ impl App {
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 386, 90, 24)?;
+        let outline = self.add_control(
+            w!("BUTTON"),
+            "Outline only (keep text readable)",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_OUTLINE,
+            24,
+            372,
+            390,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 421, 90, 24)?;
         self.add_control(
             w!("BUTTON"),
             "",
             WS_TABSTOP | BS_OWNERDRAW as u32,
             ID_COLOR,
             124,
-            378,
+            413,
             190,
             33,
         )?;
@@ -487,7 +498,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_CLICK_COLORS,
             24,
-            424,
+            459,
             400,
             25,
         )?;
@@ -497,7 +508,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_AUTO_HIDE,
             24,
-            459,
+            490,
             400,
             25,
         )?;
@@ -507,7 +518,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_START_MINIMIZED,
             24,
-            490,
+            521,
             400,
             25,
         )?;
@@ -517,7 +528,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_LAUNCH_AT_LOGIN,
             24,
-            521,
+            552,
             400,
             25,
         )?;
@@ -527,7 +538,7 @@ impl App {
             0,
             0,
             24,
-            555,
+            590,
             400,
             24,
         )?;
@@ -537,7 +548,7 @@ impl App {
             WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
             ID_SHORTCUT,
             24,
-            583,
+            618,
             270,
             28,
         )?;
@@ -547,7 +558,7 @@ impl App {
             WS_TABSTOP,
             ID_APPLY_SHORTCUT,
             308,
-            583,
+            618,
             90,
             28,
         )?;
@@ -557,22 +568,22 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_HOLD,
             24,
-            621,
+            656,
             400,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 659, 400, 80)?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 694, 400, 80)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            750,
+            785,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 750, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 785, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(shortcut, EM_SETLIMITTEXT, 80, 0);
@@ -584,6 +595,7 @@ impl App {
                 0,
             );
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
+            SendMessageW(outline, BM_SETCHECK, usize::from(settings.outline_only), 0);
             SendMessageW(
                 start_minimized,
                 BM_SETCHECK,
@@ -723,6 +735,12 @@ impl App {
                 self.control(ID_AUTO_HIDE),
                 BM_SETCHECK,
                 usize::from(settings.auto_hide),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_OUTLINE),
+                BM_SETCHECK,
+                usize::from(settings.outline_only),
                 0,
             );
         }
@@ -879,6 +897,12 @@ impl App {
                     unsafe { SendMessageW(self.control(ID_AUTO_HIDE), BM_GETCHECK, 0, 0) != 0 };
                 self.set_auto_hide(enabled)?;
                 self.settings.borrow_mut().auto_hide = enabled;
+                self.changed()?;
+            }
+            ID_OUTLINE => {
+                let outline_only =
+                    unsafe { SendMessageW(self.control(ID_OUTLINE), BM_GETCHECK, 0, 0) != 0 };
+                self.settings.borrow_mut().outline_only = outline_only;
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
@@ -1910,12 +1934,34 @@ fn native_checks() -> Result<(), String> {
                 !app.settings.borrow().enabled,
                 "native checkbox notification",
             )?;
+            SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().outline_only,
+                "outline checkbox notification",
+            )?;
+            app.save();
+            ensure(
+                Settings::load(&path)?.outline_only,
+                "outline checkbox choice persists",
+            )?;
+            SendMessageW(app.control(ID_PRESET_SLIDES), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().outline_only
+                    && SendMessageW(app.control(ID_OUTLINE), BM_GETCHECK, 0, 0) != 0,
+                "presentation preset preserves outline selection",
+            )?;
+            SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
+            ensure(
+                !app.settings.borrow().outline_only,
+                "outline checkbox toggles back",
+            )?;
             ensure(
                 app.hotkey_id.get() != 0,
                 "global shortcut is registered before testing dispatch",
             )?;
             SendMessageW(app.window.get(), WM_HOTKEY, app.hotkey_id.get() as usize, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
+            SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
             ensure(
                 SendMessageW(app.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) == 0,
                 "distinct click colors default off",
@@ -1942,8 +1988,10 @@ fn native_checks() -> Result<(), String> {
             )?;
             SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
             ensure(
-                app.settings.borrow().auto_hide && !app.keyboard_hook.get().is_null(),
-                "auto-hide checkbox installs keyboard activity observer",
+                app.settings.borrow().auto_hide
+                    && app.settings.borrow().outline_only
+                    && !app.keyboard_hook.get().is_null(),
+                "auto-hide works with outline and installs keyboard activity observer",
             )?;
             let now = app.now();
             app.auto_hide.replace(AutoHide::new(now));
@@ -2009,6 +2057,7 @@ fn native_checks() -> Result<(), String> {
                 "disabling auto-hide removes keyboard observer and restores halo",
             )?;
             SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
+            SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
             app.command(ID_HIDE)?;
             ensure(IsWindowVisible(app.window.get()) == 0, "hide to tray")?;
             ensure(
@@ -2129,6 +2178,70 @@ fn native_checks() -> Result<(), String> {
                 app.rendered.get() == 0.0,
                 "click release restores appearance",
             )?;
+            let ring_x = cursor.x
+                + if cursor.x + 36 < monitor_info.rcMonitor.right {
+                    36
+                } else {
+                    -36
+                };
+            app.settings.borrow_mut().enabled = false;
+            app.tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let ring_baseline = capture_pixel(ring_x, cursor.y)?;
+            app.settings.borrow_mut().enabled = true;
+            app.settings.borrow_mut().outline_only = true;
+            app.tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let outline_center = capture_pixel(x, y)?;
+            for c in 0..3 {
+                ensure(
+                    (outline_center[c] as i16 - baseline[c] as i16).abs() <= 8,
+                    "outline keeps the cursor interior clear",
+                )?;
+            }
+            let outline_ring = capture_pixel(ring_x, cursor.y)?;
+            let alpha = (255.0_f32 * 0.35).round() / 255.0;
+            let mut actual_cursor: POINT = zeroed();
+            check(GetCursorPos(&mut actual_cursor), "Get outline test cursor")?;
+            let mut outline_rect: RECT = zeroed();
+            check(
+                GetWindowRect(app.halo.get(), &mut outline_rect),
+                "Get outline bounds",
+            )?;
+            for c in 0..3 {
+                let expected = rgb[c] as f32 * alpha + ring_baseline[c] as f32 * (1.0 - alpha);
+                ensure(
+                    (outline_ring[c] as f32 - expected).abs() <= 8.0,
+                    &format!(
+                        "outline ring opacity: baseline {ring_baseline:?}, actual {outline_ring:?}, channel {c} expected {expected}, cursor ({}, {}) now ({}, {}), bounds ({}, {}, {}, {}), alpha {}, visible {}",
+                        cursor.x,
+                        cursor.y,
+                        actual_cursor.x,
+                        actual_cursor.y,
+                        outline_rect.left,
+                        outline_rect.top,
+                        outline_rect.right,
+                        outline_rect.bottom,
+                        app.rendered_alpha.get(),
+                        IsWindowVisible(app.halo.get())
+                    ),
+                )?;
+            }
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONDOWN as usize, 0);
+            app.tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let outline_pressed = capture_pixel(ring_x, cursor.y)?;
+            for c in 0..3 {
+                let expected = (rgb[c] as f32 * 0.65).round() * alpha
+                    + ring_baseline[c] as f32 * (1.0 - alpha);
+                ensure(
+                    (outline_pressed[c] as f32 - expected).abs() <= 8.0,
+                    "outline click feedback darkens ring without changing opacity",
+                )?;
+            }
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONUP as usize, 0);
+            std::thread::sleep(std::time::Duration::from_millis(310));
+            app.tick()?;
             check(
                 PostMessageW(app.window.get(), WM_CLOSE, 0, 0),
                 "Request native window close",
@@ -2392,7 +2505,7 @@ mod activation_tests {
                 0,
                 0,
                 450,
-                795,
+                830,
                 null_mut(),
                 null_mut(),
                 app.instance,
@@ -2412,6 +2525,7 @@ mod activation_tests {
                     ID_SCALE_WITH_DPI,
                     ID_OPACITY_LABEL,
                     ID_OPACITY,
+                    ID_OUTLINE,
                     ID_COLOR,
                     ID_CLICK_COLORS,
                     ID_AUTO_HIDE,
@@ -2429,13 +2543,13 @@ mod activation_tests {
                     assert_ne!(GetWindowRect(control, &mut bounds), 0);
                     assert!(bounds.top >= previous_bottom, "overlapping control {id}");
                     previous_bottom = bounds.bottom;
-                    assert!(bounds.bottom <= app.scale(795));
+                    assert!(bounds.bottom <= app.scale(830));
                 }
                 let controls = app.controls.borrow();
                 for (index, control) in controls.iter().enumerate() {
                     assert!(control.x >= 0 && control.y >= 0);
                     assert!(control.x + control.width <= 450);
-                    assert!(control.y + control.height <= 795);
+                    assert!(control.y + control.height <= 830);
                     for other in controls.iter().skip(index + 1) {
                         assert!(
                             control.x + control.width <= other.x
