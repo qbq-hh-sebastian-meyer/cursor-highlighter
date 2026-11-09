@@ -15,6 +15,79 @@ and launch `cursor-highlighter.exe`. No Rust or .NET installation is needed.
 Each archive has a matching `.sha256` file. The executables are not code-signed;
 Windows SmartScreen may show an unknown-publisher warning.
 
+### Automatic updates
+
+Updater-enabled builds check this repository's public stable GitHub Releases
+30 seconds after launch and every 24 hours while running. They compare SemVer
+(so `0.10.0` is newer than `0.9.0`), ignore drafts/prereleases, and automatically
+download the newest newer package for the **running executable's architecture**
+(ARM64 or x64). Checks poll GitHub; this is not a real-time push subscription.
+The bounded release query considers the 100 most recently published releases.
+Already downloaded updates do not prevent checking for a still newer version.
+
+Open **Updates...** in Settings or the tray menu for progress, errors, a manual
+**Check for updates** action, and **Install and restart...**. A downloaded update
+changes the Settings button to **Update ready...** and the tray tooltip; it never
+opens a dialog, takes focus, stops the halo, or restarts the app on its own.
+Installation requires clicking the install button and then answering **Yes**;
+**No** is the default. Choose No to continue presenting. Pending downloads remain
+available for the current app session; exiting normally discards them.
+
+**Automatically check and download updates** is on by default and is persisted
+as the additive `AutomaticUpdates` JSON boolean. Older settings files default to
+on. Turning it off disables automatic network checks and downloads; manual checks
+still work and existing downloaded updates can still be installed. An in-flight
+automatic HTTP request may finish (within its timeout), but cancellation is
+checked between requests and before staging, and its result is discarded.
+Automatic errors appear in Updates instead of repeated modal dialogs.
+Checks are serialized, manual checks are limited to once per minute, and failed
+automatic checks back off from 15 minutes to at most 24 hours within the session.
+Network work runs off the native UI thread, with a 10-second connection timeout,
+120-second per-request timeout, and bounded responses (2 MiB metadata, 1 KiB
+checksum, 32 MiB ZIP). HTTPS redirects are limited to five and restricted to
+GitHub's release download hosts. No GitHub token is required or sent.
+
+Before staging, the updater requires the release's matching `.zip.sha256` file,
+checks the ZIP's size and SHA-256, accepts only the root executable and optional
+`README.md`, and checks the executable's PE architecture. Expanded executables
+are limited to 64 MiB. Paths, directories, symlinks, extra files, and duplicate
+entries in the ZIP are rejected; archive paths are never used as output paths.
+Checksums detect corruption, **not publisher authenticity or code signing**.
+The releases and their checksums rely on the same GitHub account and HTTPS trust.
+
+Installation preserves the portable executable's exact location/name,
+`%LOCALAPPDATA%\CursorHighlighter\settings.json`, and the existing login registry
+entry. The executable's directory must be writable: there is no administrator
+prompt or service. Staging uses a unique `.cursor-highlighter-update-*` sibling
+directory. After your confirmation, a copy of the current executable runs as a
+scoped helper, opens a handle to this app, revalidates the staged ZIP/executable,
+then waits for the app to exit. It revalidates again before replacement, keeps
+`backup.exe` in that directory, and restores the original if replacement or
+initialization of the restarted app fails. Only the newly spawned
+replacement process may be stopped during recovery; other running copies are
+never terminated. The restarted app acknowledges native initialization before
+cleanup removes the backup and helper. Settings controls are briefly disabled
+while the confirmed helper handoff is pending, preventing unsaved changes.
+
+Permission/lock failures are reported without elevation. A failed helper or
+power loss can leave its staging directory behind; do not delete it while an
+update is running. If recovery reports a failed rollback, exit the app and
+restore the reported `backup.exe` to the original executable path before retrying.
+Automatic rollback covers reported replacement/startup failures, not power-loss
+atomicity or failures occurring after successful initialization. Successful
+cleanup deletes only the known updater files and the now-empty staging directory.
+
+Published v0.2.0 and older builds do not contain this updater. Install an
+updater-enabled release manually once to receive subsequent automatic downloads.
+
+### What's new in v0.3.0
+
+Automatic stable-release checks and verified architecture-matched downloads are
+now built in. Open **Updates...** to check manually, disable automatic downloads,
+or explicitly approve installation and restart. Updates never interrupt a
+presentation without your confirmation. Settings and the portable executable
+location are preserved, with backup/recovery during replacement.
+
 ### What's new in v0.2.0
 
 This release includes all seven feature additions: optional idle/typing
@@ -185,8 +258,8 @@ cargo build --release --locked --target x86_64-pc-windows-msvc
 The resulting executable is `target\x86_64-pc-windows-msvc\release\cursor-highlighter.exe`.
 Cross-compilation requires both the host toolchain's native libraries (for build
 scripts) and the target libraries. There is no installer/publishing step.
-Cargo downloads dependencies on the first build; the app itself has no network
-functionality.
+Cargo downloads dependencies on the first build. The app contacts GitHub only
+for enabled automatic updates or an explicit manual update check.
 
 ## GitHub Actions releases
 
@@ -243,6 +316,18 @@ register the app for login or change real user settings.
 Hidden native windows and unused extended-function-key chords also check
 shortcut conflicts, replacement, settings controls, and hold dispatch,
 without injecting keyboard input or touching the running app or user settings.
+Updater tests use mocked release/download fixtures and a loopback HTTP server
+for version/architecture selection, opt-out compatibility, URL restrictions,
+HTTP errors/timeouts/limits, checksum/ZIP rejection, cancellation, cooldown,
+and bounded retry scheduling. Isolated filesystem tests cover staged tampering,
+rename/permission errors, restart-failure rollback, and scoped cleanup. A real
+multi-process fixture copies the test executable into a temporary portable-app
+directory and exercises helper readiness, waiting for the parent to exit,
+revalidation, replacement, initialization acknowledgment, and cleanup. Its ignored
+`process_driver` test is invoked automatically only by that fixture. Hidden native
+Updates-window tests cover opt-out persistence, disabled install controls, DPI
+layout, and lack of focus changes, without networking or showing a dialog.
+These checks do not install a public release or replace your running executable.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
@@ -274,6 +359,10 @@ settings, click/auto-hide timing, and anti-aliased premultiplied BGRA rendering.
 optional outline is formed by subtracting an inset ellipse from the filled
 shape, preserving the existing alpha, color, and click-feedback behavior.
 `src\startup.rs` owns the current-user launch-at-login registry entry.
+`src\updater.rs` owns release selection, bounded HTTPS downloads using Windows
+certificate validation, verified ZIP staging, background update scheduling, and
+the scoped installer helper/rollback protocol. Update status is polled by a
+separate native timer; halo rendering and hooks stay on the original UI thread.
 
 The halo is a per-pixel-alpha, click-through, non-activating layered topmost
 window. A 16 ms timer follows desktop cursor coordinates; only appearance changes
