@@ -2231,12 +2231,24 @@ fn native_checks() -> Result<(), String> {
             app.tick()?;
             std::thread::sleep(std::time::Duration::from_millis(100));
             let outline_pressed = capture_pixel(ring_x, cursor.y)?;
+            check(
+                GetCursorPos(&mut actual_cursor),
+                "Get pressed outline test cursor",
+            )?;
             for c in 0..3 {
                 let expected = (rgb[c] as f32 * 0.65).round() * alpha
                     + ring_baseline[c] as f32 * (1.0 - alpha);
                 ensure(
                     (outline_pressed[c] as f32 - expected).abs() <= 8.0,
-                    "outline click feedback darkens ring without changing opacity",
+                    &format!(
+                        "outline click feedback: baseline {ring_baseline:?}, actual {outline_pressed:?}, channel {c} expected {expected}, cursor ({}, {}) now ({}, {}), feedback {}, alpha {}",
+                        cursor.x,
+                        cursor.y,
+                        actual_cursor.x,
+                        actual_cursor.y,
+                        app.rendered.get(),
+                        app.rendered_alpha.get()
+                    ),
                 )?;
             }
             mouse_proc(HC_ACTION as i32, WM_LBUTTONUP as usize, 0);
