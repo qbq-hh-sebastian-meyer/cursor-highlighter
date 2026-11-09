@@ -129,6 +129,7 @@ pub struct Settings {
     pub start_minimized: bool,
     pub scale_with_dpi: bool,
     pub auto_hide: bool,
+    pub automatic_updates: bool,
 }
 
 impl Default for Settings {
@@ -145,6 +146,7 @@ impl Default for Settings {
             start_minimized: false,
             scale_with_dpi: false,
             auto_hide: false,
+            automatic_updates: true,
         }
     }
 }
@@ -693,7 +695,7 @@ mod tests {
                         .as_object()
                         .unwrap()
                         .len(),
-                    11
+                    12
                 );
                 settings.diameter = 97;
                 settings.opacity = 31;

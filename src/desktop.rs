@@ -2,6 +2,7 @@ use crate::model::{
     ActivationMode, AutoHide, ClickFeedback, PresentationPreset, Settings, Shortcut, render,
 };
 use crate::startup;
+use crate::updater::Updates;
 use std::{
     cell::{Cell, RefCell},
     mem::{size_of, zeroed},
@@ -46,12 +47,19 @@ const ID_SHORTCUT: u16 = 117;
 const ID_APPLY_SHORTCUT: u16 = 118;
 const ID_HOLD: u16 = 119;
 const ID_OUTLINE: u16 = 121;
+const ID_UPDATES: u16 = 122;
+const ID_UPDATE_AUTO: u16 = 130;
+const ID_UPDATE_STATUS: u16 = 131;
+const ID_UPDATE_CHECK: u16 = 132;
+const ID_UPDATE_INSTALL: u16 = 133;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
+const UPDATE_TIMER: usize = 3;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 const TBM_GETPOS: u32 = WM_USER;
 const HALO_CLASS: *const u16 = w!("CursorHighlighter.Rust.Halo");
 const SETTINGS_CLASS: *const u16 = w!("CursorHighlighter.Rust.Settings");
+const UPDATES_CLASS: *const u16 = w!("CursorHighlighter.Rust.Updates");
 // MAKEINTRESOURCEW encodes an integer resource ID, not an address to dereference.
 const ICON_RESOURCE: *const u16 = std::ptr::without_provenance(1);
 
@@ -160,6 +168,12 @@ struct App {
     dpi: Cell<u32>,
     taskbar_message: Cell<u32>,
     launch_at_login: Cell<bool>,
+    updates_window: Cell<HWND>,
+    updates_font: Cell<HFONT>,
+    updates_controls: RefCell<Vec<Control>>,
+    updates: RefCell<Updates>,
+    update_summary: RefCell<String>,
+    update_dialog_text: RefCell<String>,
 }
 
 impl App {
@@ -192,6 +206,12 @@ impl App {
             dpi: Cell::new(96),
             taskbar_message: Cell::new(0),
             launch_at_login: Cell::new(false),
+            updates_window: Cell::new(null_mut()),
+            updates_font: Cell::new(null_mut()),
+            updates_controls: RefCell::new(Vec::new()),
+            updates: RefCell::new(Updates::new()),
+            update_summary: RefCell::new(String::new()),
+            update_dialog_text: RefCell::new(String::new()),
         }
     }
 
@@ -334,7 +354,12 @@ impl App {
     }
 
     fn control(&self, id: u16) -> HWND {
-        unsafe { GetDlgItem(self.window.get(), id as i32) }
+        let parent = if (ID_UPDATE_AUTO..=ID_UPDATE_INSTALL).contains(&id) {
+            self.updates_window.get()
+        } else {
+            self.window.get()
+        };
+        unsafe { GetDlgItem(parent, id as i32) }
     }
 
     fn text(&self, id: u16, text: &str) -> Result<(), String> {
@@ -584,6 +609,16 @@ impl App {
             32,
         )?;
         self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 785, 85, 32)?;
+        self.add_control(
+            w!("BUTTON"),
+            "Updates...",
+            WS_TABSTOP,
+            ID_UPDATES,
+            250,
+            785,
+            172,
+            32,
+        )?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(shortcut, EM_SETLIMITTEXT, 80, 0);
@@ -872,7 +907,25 @@ impl App {
     }
 
     fn command(&self, id: u16) -> Result<(), String> {
+        if self.updates.borrow().installing {
+            return Ok(());
+        }
         match id {
+            ID_UPDATES => self.open_updates()?,
+            ID_UPDATE_CHECK => {
+                self.updates.borrow_mut().check(true);
+                self.refresh_updates()?;
+            }
+            ID_UPDATE_AUTO => {
+                self.settings.borrow_mut().automatic_updates =
+                    unsafe { SendMessageW(self.control(ID_UPDATE_AUTO), BM_GETCHECK, 0, 0) != 0 };
+                self.updates
+                    .borrow_mut()
+                    .set_automatic(self.settings.borrow().automatic_updates);
+                self.changed()?;
+                self.refresh_updates()?;
+            }
+            ID_UPDATE_INSTALL => self.install_update()?,
             ID_APPLY_SHORTCUT => self.apply_shortcut()?,
             ID_HOLD => {
                 let hold = unsafe { SendMessageW(self.control(ID_HOLD), BM_GETCHECK, 0, 0) != 0 };
@@ -973,6 +1026,9 @@ impl App {
     }
 
     fn toggle(&self) -> Result<(), String> {
+        if self.updates.borrow().installing {
+            return Ok(());
+        }
         {
             let mut settings = self.settings.borrow_mut();
             settings.enabled = !settings.enabled;
@@ -1130,6 +1186,352 @@ impl App {
         }
     }
 
+    fn open_updates(&self) -> Result<(), String> {
+        self.updates_dialog(true)
+    }
+
+    fn updates_dialog(&self, visible: bool) -> Result<(), String> {
+        unsafe {
+            if self.updates_window.get().is_null() {
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(updates_proc),
+                    hInstance: self.instance,
+                    hIcon: LoadIconW(self.instance, ICON_RESOURCE),
+                    hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+                    hbrBackground: (COLOR_BTNFACE + 1) as HBRUSH,
+                    lpszClassName: UPDATES_CLASS,
+                    ..zeroed()
+                };
+                if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
+                    return Err(os_error("Register updates window"));
+                }
+                let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+                let mut bounds = RECT {
+                    right: self.scale(450),
+                    bottom: self.scale(290),
+                    ..zeroed()
+                };
+                check(
+                    AdjustWindowRectExForDpi(
+                        &mut bounds,
+                        style,
+                        0,
+                        WS_EX_CONTROLPARENT,
+                        self.dpi.get(),
+                    ),
+                    "Size updates window",
+                )?;
+                let window = CreateWindowExW(
+                    WS_EX_CONTROLPARENT,
+                    UPDATES_CLASS,
+                    w!("Cursor Highlighter updates"),
+                    style,
+                    CW_USEDEFAULT,
+                    CW_USEDEFAULT,
+                    bounds.right - bounds.left,
+                    bounds.bottom - bounds.top,
+                    self.window.get(),
+                    null_mut(),
+                    self.instance,
+                    null(),
+                );
+                if window.is_null() {
+                    return Err(os_error("Create updates window"));
+                }
+                self.updates_window.set(window);
+                self.update_dialog_text.borrow_mut().clear();
+                let result = (|| {
+                    for (id, class, label, style, x, y, width, height) in [
+                        (
+                            ID_UPDATE_AUTO,
+                            w!("BUTTON"),
+                            "Automatically check and download updates",
+                            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+                            20,
+                            20,
+                            410,
+                            28,
+                        ),
+                        (
+                            ID_UPDATE_STATUS,
+                            w!("EDIT"),
+                            "",
+                            WS_VSCROLL | WS_TABSTOP | ES_MULTILINE as u32 | ES_READONLY as u32,
+                            20,
+                            60,
+                            410,
+                            110,
+                        ),
+                        (
+                            0,
+                            w!("STATIC"),
+                            "Installing always asks first. No automatic restarts.",
+                            0,
+                            20,
+                            174,
+                            410,
+                            30,
+                        ),
+                        (
+                            ID_UPDATE_CHECK,
+                            w!("BUTTON"),
+                            "Check for updates",
+                            WS_TABSTOP,
+                            20,
+                            225,
+                            180,
+                            34,
+                        ),
+                        (
+                            ID_UPDATE_INSTALL,
+                            w!("BUTTON"),
+                            "Install and restart...",
+                            WS_TABSTOP,
+                            215,
+                            225,
+                            215,
+                            34,
+                        ),
+                    ] {
+                        let control = CreateWindowExW(
+                            0,
+                            class,
+                            wide(label).as_ptr(),
+                            WS_CHILD | WS_VISIBLE | style,
+                            self.scale(x),
+                            self.scale(y),
+                            self.scale(width),
+                            self.scale(height),
+                            window,
+                            id as usize as HMENU,
+                            self.instance,
+                            null(),
+                        );
+                        if control.is_null() {
+                            return Err(os_error("Create updates control"));
+                        }
+                        self.updates_controls.borrow_mut().push(Control {
+                            window: control,
+                            x,
+                            y,
+                            width,
+                            height,
+                        });
+                    }
+                    let dpi = GetDpiForWindow(window);
+                    self.layout_updates(dpi)?;
+                    let mut bounds = RECT {
+                        right: (450 * dpi as i32 + 48) / 96,
+                        bottom: (290 * dpi as i32 + 48) / 96,
+                        ..zeroed()
+                    };
+                    check(
+                        AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_CONTROLPARENT, dpi),
+                        "Size updates window on its initial monitor",
+                    )?;
+                    check(
+                        SetWindowPos(
+                            window,
+                            null_mut(),
+                            0,
+                            0,
+                            bounds.right - bounds.left,
+                            bounds.bottom - bounds.top,
+                            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        ),
+                        "Apply updates window size",
+                    )?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    DestroyWindow(window);
+                    self.updates_window.set(null_mut());
+                    self.updates_controls.borrow_mut().clear();
+                    return Err(error);
+                }
+            }
+            self.refresh_updates()?;
+            if visible {
+                ShowWindow(self.updates_window.get(), SW_SHOWNORMAL);
+                SetForegroundWindow(self.updates_window.get());
+            }
+        }
+        Ok(())
+    }
+
+    fn layout_updates(&self, dpi: u32) -> Result<(), String> {
+        let scale = |value: i32| (value * dpi as i32 + 48) / 96;
+        unsafe {
+            let font = CreateFontW(
+                -scale(14),
+                0,
+                0,
+                0,
+                FW_NORMAL as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET as u32,
+                OUT_DEFAULT_PRECIS as u32,
+                CLIP_DEFAULT_PRECIS as u32,
+                CLEARTYPE_QUALITY as u32,
+                DEFAULT_PITCH as u32,
+                w!("Segoe UI"),
+            );
+            if font.is_null() {
+                return Err(os_error("Create updates font"));
+            }
+            let old = self.updates_font.replace(font);
+            for control in self.updates_controls.borrow().iter() {
+                SendMessageW(control.window, WM_SETFONT, font as usize, 1);
+                check(
+                    SetWindowPos(
+                        control.window,
+                        null_mut(),
+                        scale(control.x),
+                        scale(control.y),
+                        scale(control.width),
+                        scale(control.height),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    ),
+                    "Scale updates control",
+                )?;
+            }
+            if !old.is_null() {
+                DeleteObject(old);
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_updates(&self) -> Result<(), String> {
+        let (status, ready, busy, installing) = {
+            let updates = self.updates.borrow();
+            (
+                updates.status.clone(),
+                updates.staged.is_some(),
+                updates.busy(),
+                updates.installing,
+            )
+        };
+        unsafe {
+            EnableWindow(self.window.get(), i32::from(!installing));
+        }
+        if !self.updates_window.get().is_null() {
+            let automatic = self.settings.borrow().automatic_updates;
+            let text = format!(
+                "{status}\r\n\r\nAutomatic checks/downloads: {}.",
+                if automatic {
+                    "on"
+                } else {
+                    "off (manual checks still available)"
+                }
+            );
+            if *self.update_dialog_text.borrow() != text {
+                self.text(ID_UPDATE_STATUS, &text)?;
+                *self.update_dialog_text.borrow_mut() = text;
+            }
+            unsafe {
+                SendMessageW(
+                    self.control(ID_UPDATE_AUTO),
+                    BM_SETCHECK,
+                    usize::from(automatic),
+                    0,
+                );
+                EnableWindow(
+                    self.control(ID_UPDATE_CHECK),
+                    i32::from(!busy && !installing),
+                );
+                EnableWindow(
+                    self.control(ID_UPDATE_INSTALL),
+                    i32::from(ready && !busy && !installing),
+                );
+                EnableWindow(self.control(ID_UPDATE_AUTO), i32::from(!installing));
+            }
+        }
+        let summary = if ready {
+            "Update ready..."
+        } else {
+            "Updates..."
+        };
+        self.text(ID_UPDATES, summary)?;
+        let summary = format!("{summary} {status}");
+        if *self.update_summary.borrow() != summary && self.tray_added.get() {
+            let mut data = self.tray_data();
+            let label = if ready {
+                "Cursor Highlighter - update ready; open Updates to install".to_string()
+            } else if status.starts_with("Update failed:") || status.starts_with("Cannot install") {
+                "Cursor Highlighter - update error; see Updates".to_string()
+            } else {
+                "Cursor Highlighter".to_string()
+            };
+            data.szTip.fill(0);
+            for (to, from) in data.szTip.iter_mut().zip(wide(&label)) {
+                *to = from;
+            }
+            if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } == 0 {
+                eprintln!(
+                    "{}",
+                    os_error(
+                        "Update notification icon status; status remains available in Updates"
+                    )
+                );
+            }
+            *self.update_summary.borrow_mut() = summary;
+        }
+        Ok(())
+    }
+
+    fn poll_updates(&self) -> Result<(), String> {
+        let automatic = self.settings.borrow().automatic_updates;
+        let handoff = self.updates.borrow_mut().poll(automatic);
+        if handoff.is_some() {
+            // Settings were persisted before the helper was launched. Exit the
+            // message loop without a second, potentially failing settings write.
+            unsafe {
+                PostQuitMessage(0);
+            }
+            return Ok(());
+        }
+        self.refresh_updates()
+    }
+
+    fn install_update(&self) -> Result<(), String> {
+        let version = {
+            let updates = self.updates.borrow();
+            if updates.busy() || updates.installing {
+                return Ok(());
+            }
+            updates
+                .staged
+                .as_ref()
+                .map(|stage| stage.version.to_string())
+        };
+        let Some(version) = version else {
+            return Ok(());
+        };
+        let confirmed = unsafe {
+            MessageBoxW(
+                    self.updates_window.get(),
+                    wide(&format!("Install Cursor Highlighter v{version} and restart now?\r\n\r\nThe halo will stop briefly. Choose No to keep presenting; the update stays downloaded.")).as_ptr(),
+                    w!("Install update?"), MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+                ) == IDYES
+        };
+        if !confirmed {
+            return Ok(());
+        }
+        if let Err(error) = self.settings.borrow().save(&self.settings_path) {
+            self.updates.borrow_mut().status =
+                format!("Cannot install until settings are saved: {error}");
+        } else {
+            self.dirty.set(false);
+            unsafe {
+                KillTimer(self.window.get(), SAVE_TIMER);
+            }
+            self.updates.borrow_mut().install();
+        }
+        self.refresh_updates()
+    }
     fn tray_data(&self) -> NOTIFYICONDATAW {
         let mut data: NOTIFYICONDATAW = unsafe { zeroed() };
         data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
@@ -1150,6 +1552,7 @@ impl App {
             "Add notification-area icon",
         )?;
         self.tray_added.set(true);
+        self.update_summary.borrow_mut().clear();
         Ok(())
     }
 
@@ -1182,6 +1585,7 @@ impl App {
                 for (id, label) in [
                     (ID_PRESET_SLIDES, w!("Slides preset")),
                     (ID_PRESET_DEMO, w!("Live demo preset")),
+                    (ID_UPDATES, w!("Updates...")),
                 ] {
                     check(
                         AppendMenuW(menu, MF_STRING, id as usize, label),
@@ -1427,6 +1831,7 @@ impl Drop for App {
             if !self.window.get().is_null() {
                 KillTimer(self.window.get(), FRAME_TIMER);
                 KillTimer(self.window.get(), SAVE_TIMER);
+                KillTimer(self.window.get(), UPDATE_TIMER);
             }
             if !self.hook.get().is_null() && UnhookWindowsHookEx(self.hook.get()) == 0 {
                 eprintln!("{}", os_error("Remove mouse hook"));
@@ -1451,11 +1856,15 @@ impl Drop for App {
             if IsWindow(self.window.get()) != 0 {
                 DestroyWindow(self.window.get());
             }
+            if !self.updates_font.get().is_null() {
+                DeleteObject(self.updates_font.get());
+            }
             if !self.font.get().is_null() {
                 DeleteObject(self.font.get());
             }
             UnregisterClassW(HALO_CLASS, self.instance);
             UnregisterClassW(SETTINGS_CLASS, self.instance);
+            UnregisterClassW(UPDATES_CLASS, self.instance);
         }
     }
 }
@@ -1532,6 +1941,9 @@ unsafe extern "system" fn settings_proc(
                 app.command((wp & 0xFFFF) as u16)
             }
             WM_HSCROLL => {
+                if app.updates.borrow().installing {
+                    return Some(0);
+                }
                 let slider = lp as HWND;
                 let value = unsafe { SendMessageW(slider, TBM_GETPOS, 0, 0) } as u32;
                 if slider == app.control(ID_DIAMETER) {
@@ -1548,8 +1960,19 @@ unsafe extern "system" fn settings_proc(
                 app.save();
                 Ok(())
             }
+            WM_TIMER if wp == UPDATE_TIMER => {
+                if let Err(error) = app.poll_updates() {
+                    eprintln!("Update interface error: {error}");
+                    app.updates.borrow_mut().status = format!("Update interface error: {error}");
+                }
+                Ok(())
+            }
             WM_HOTKEY if app.hotkey_id.get() != 0 && wp == app.hotkey_id.get() as usize => {
-                app.shortcut_pressed()
+                if app.updates.borrow().installing {
+                    Ok(())
+                } else {
+                    app.shortcut_pressed()
+                }
             }
             WM_CLOSE | WM_DESTROY => {
                 app.save();
@@ -1588,6 +2011,52 @@ unsafe extern "system" fn settings_proc(
         };
         if let Err(error) = result {
             app.fail(error);
+        }
+        Some(0)
+    })
+    .flatten();
+    handled.unwrap_or_else(|| unsafe { DefWindowProcW(window, message, wp, lp) })
+}
+
+unsafe extern "system" fn updates_proc(
+    window: HWND,
+    message: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
+    let handled = with_app(|app| {
+        if app.updates_window.get() != window {
+            return None;
+        }
+        let result = match message {
+            WM_CLOSE => {
+                unsafe {
+                    ShowWindow(window, SW_HIDE);
+                }
+                Ok(())
+            }
+            WM_COMMAND if (wp >> 16) & 0xFFFF == BN_CLICKED as usize => {
+                app.command((wp & 0xFFFF) as u16)
+            }
+            WM_DPICHANGED => {
+                let rect = unsafe { &*(lp as *const RECT) };
+                unsafe {
+                    SetWindowPos(
+                        window,
+                        null_mut(),
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                app.layout_updates((wp & 0xFFFF) as u32)
+            }
+            _ => return None,
+        };
+        if let Err(error) = result {
+            app.warning(&error);
         }
         Some(0)
     })
@@ -1659,6 +2128,7 @@ pub fn run() -> Result<(), String> {
     CURRENT.with(|current| current.set(&*app));
     let result = (|| {
         app.setup(visible)?;
+        updater_start(&app)?;
         if let Err(error) = login {
             unsafe {
                 SendMessageW(
@@ -1686,7 +2156,10 @@ pub fn run() -> Result<(), String> {
                 if status == 0 {
                     break;
                 }
-                if IsDialogMessageW(app.window.get(), &message) == 0 {
+                if (app.updates_window.get().is_null()
+                    || IsDialogMessageW(app.updates_window.get(), &message) == 0)
+                    && IsDialogMessageW(app.window.get(), &message) == 0
+                {
                     TranslateMessage(&message);
                     DispatchMessageW(&message);
                 }
@@ -1700,6 +2173,18 @@ pub fn run() -> Result<(), String> {
     CURRENT.with(|current| current.set(null()));
     drop(app);
     result
+}
+
+fn updater_start(app: &App) -> Result<(), String> {
+    crate::updater::finish_restart()?;
+    app.updates
+        .borrow_mut()
+        .set_automatic(app.settings.borrow().automatic_updates);
+    check(
+        unsafe { SetTimer(app.window.get(), UPDATE_TIMER, 1000, None) } as i32,
+        "Start update polling timer",
+    )?;
+    app.refresh_updates()
 }
 
 pub fn self_test() -> Result<(), String> {
@@ -2663,6 +3148,95 @@ mod activation_tests {
     impl Drop for CurrentApp {
         fn drop(&mut self) {
             CURRENT.with(|current| current.set(null()));
+        }
+    }
+
+    #[test]
+    fn hidden_updates_dialog_opt_out_dpi_and_install_gate_without_network_or_real_settings() {
+        let _lock = NATIVE_TEST_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let app = Box::new(App::new(
+            Settings {
+                enabled: false,
+                ..Settings::default()
+            },
+            path.clone(),
+        ));
+        unsafe {
+            let common = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_BAR_CLASSES | ICC_STANDARD_CLASSES,
+            };
+            assert_ne!(InitCommonControlsEx(&common), 0);
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(settings_proc),
+                hInstance: app.instance,
+                lpszClassName: SETTINGS_CLASS,
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            app.window.set(CreateWindowExW(
+                0,
+                SETTINGS_CLASS,
+                w!("Hidden update test"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                450,
+                830,
+                null_mut(),
+                null_mut(),
+                app.instance,
+                null(),
+            ));
+            assert!(!app.window.get().is_null());
+            app.add_controls().unwrap();
+            CURRENT.with(|current| current.set(&*app));
+            let _current = CurrentApp;
+            let foreground = GetForegroundWindow();
+            app.updates_dialog(false).unwrap();
+            assert_eq!(IsWindowVisible(app.updates_window.get()), 0);
+            assert_eq!(GetForegroundWindow(), foreground);
+            assert_eq!(
+                SendMessageW(app.control(ID_UPDATE_AUTO), BM_GETCHECK, 0, 0),
+                BST_CHECKED as isize
+            );
+            assert_eq!(IsWindowEnabled(app.control(ID_UPDATE_INSTALL)), 0);
+            assert!(!app.updates.borrow().busy());
+            assert!(!app.updates.borrow().installing);
+            for dpi in [96, 144, 192] {
+                app.layout_updates(dpi).unwrap();
+                for control in app.updates_controls.borrow().iter() {
+                    let mut bounds: RECT = zeroed();
+                    assert_ne!(GetWindowRect(control.window, &mut bounds), 0);
+                    assert_eq!(
+                        bounds.right - bounds.left,
+                        (control.width * dpi as i32 + 48) / 96
+                    );
+                    assert_eq!(
+                        bounds.bottom - bounds.top,
+                        (control.height * dpi as i32 + 48) / 96
+                    );
+                }
+            }
+            SendMessageW(app.control(ID_UPDATE_AUTO), BM_CLICK, 0, 0);
+            assert!(!app.settings.borrow().automatic_updates);
+            app.save();
+            assert!(!Settings::load(&path).unwrap().automatic_updates);
+            assert!(!app.updates.borrow().busy());
+            app.updates.borrow_mut().installing = true;
+            app.refresh_updates().unwrap();
+            assert_eq!(IsWindowEnabled(app.window.get()), 0);
+            assert_eq!(IsWindowEnabled(app.control(ID_UPDATE_CHECK)), 0);
+            app.updates.borrow_mut().installing = false;
+            app.refresh_updates().unwrap();
+            assert_ne!(IsWindowEnabled(app.window.get()), 0);
+            SendMessageW(app.updates_window.get(), WM_CLOSE, 0, 0);
+            assert_eq!(IsWindowVisible(app.updates_window.get()), 0);
+            assert_eq!(GetForegroundWindow(), foreground);
+            assert!(app.fatal.borrow().is_none());
+            app.dirty.set(false);
         }
     }
 
