@@ -31,6 +31,13 @@ machine or use the MSVC cross-compilation instructions below.
 ## Controls
 
 - **Highlight cursor** enables or disables the halo.
+- **Presentation presets:** select **Slides** for a subtle 60-unit yellow
+  (`#FFD43B`) halo at 20% opacity, or **Live demo** for a stronger 120-unit orange
+  (`#FF922B`) halo at 50% opacity. Both are also available from the tray menu
+  without opening Settings. Presets replace size, opacity, and color immediately,
+  but preserve enabled, auto-hide, and DPI sizing choices. Size uses the selected
+  physical or logical units. You can still customize all three controls
+  afterward; the resulting values are saved normally, with no preset field.
 - **Size** adjusts the diameter from 24 to 240 physical screen pixels by default.
 - **Scale size with monitor DPI** switches Size to logical pixels at 96 DPI.
   The halo follows the Windows scaling of the monitor under the cursor: an
@@ -47,6 +54,13 @@ machine or use the MSVC cross-compilation instructions below.
   darken the selected color. It stays pressed during a drag and smoothly returns
   to normal after release. Even quick clicks remain visible briefly. Input is
   always forwarded to the underlying application.
+- **Auto-hide when idle (1.5 s) or typing** is optional and off by default. When
+  enabled, the halo fades out over 180 ms after 1.5 seconds without mouse
+  movement, or as soon as keyboard activity is detected. Moving the mouse fades
+  it back in over 180 ms. Typing keeps it hidden until the mouse moves, and the
+  Highlight cursor toggle still takes priority. Keyboard detection observes only
+  key-down activity: key identities and contents are not read or stored. The
+  keyboard observer is installed only while this option is enabled.
 - **Ctrl + Alt + H** toggles the halo even while Settings is hidden. If another
   application owns the shortcut, Settings shows a warning; the checkbox and tray
   menu still work.
@@ -55,11 +69,13 @@ machine or use the MSVC cross-compilation instructions below.
 - **Exit**, the tray's **Exit**, or closing Settings stops the app. Minimizing
   only minimizes Settings.
 
-Defaults: 80 physical px diameter (DPI scaling off), yellow (`#FFD43B`), 35% opacity.
+Defaults: 80 physical px diameter (DPI scaling off), yellow (`#FFD43B`),
+35% opacity, auto-hide off.
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
-and PascalCase JSON fields have not changed. Corrupt/unreadable files show a
+and existing PascalCase JSON fields have not changed. The new `AutoHide` boolean
+defaults to `false` when absent from older files. Corrupt/unreadable files show a
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
 replaced.
@@ -151,8 +167,11 @@ cargo run --locked -- --self-test
 ```
 
 Unit tests cover C# settings compatibility, validation, atomic persistence,
-click/release/overlapping-button timing, alpha, color darkening, deformation,
-and premultiplied rendering across sizes and opacity values. DPI tests cover
+presentation preset values, persistence and subsequent manual customization,
+click/release/overlapping-button timing, idle/typing fade timing and movement
+restoration, auto-hide persistence and backward-compatible defaults, alpha, color
+darkening, deformation, and premultiplied rendering across sizes and opacity values.
+DPI tests cover
 opt-in defaults, persistence in both modes, fractional-scale rounding, simulated
 monitor transitions, larger scaled bitmaps, and negative-coordinate centering.
 A hidden-window test checks DPI lookup and monitor selection on attached displays
@@ -163,13 +182,15 @@ do not establish physical mixed-DPI cursor behavior.
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
 no-activation behavior, cursor centering, topmost placement, native controls,
-hotkey dispatch, settings persistence, DPI-scaled control layout, live DPI sizing
-checkbox changes, and actual
-desktop compositing for both the normal and pressed halo. It uses an isolated
+hotkey dispatch, optional keyboard observer lifecycle, idle/typing hiding and
+mouse-movement restoration, settings persistence, DPI-scaled control layout,
+live DPI sizing checkbox changes, and
+actual desktop compositing for both the normal and pressed halo. It uses an isolated
 temporary settings file, never overwriting your settings. Close the running app
 first, keep the desktop unlocked, and leave the cursor still over a static area
 while running this check. It calls the mouse-observer callback directly to check
-click feedback; it does not inject real clicks into your desktop.
+click feedback and calls the keyboard observer with activity-only messages; it
+does not inject real clicks or keystrokes into your desktop.
 
 Before a presentation, also verify interactively:
 
@@ -184,12 +205,15 @@ Before a presentation, also verify interactively:
 `windows-sys` provides direct Win32 bindings; there is no GUI framework.
 `src\desktop.rs` owns the native windows, controls, tray, timers, hook, color
 dialog, shortcut, and GDI resources on one UI thread. `src\model.rs` contains
-settings, click timing, and anti-aliased premultiplied BGRA rendering.
+settings, click/auto-hide timing, and anti-aliased premultiplied BGRA rendering.
 
 The halo is a per-pixel-alpha, click-through, non-activating layered topmost
 window. A 16 ms timer follows desktop cursor coordinates; only appearance changes
 regenerate its bitmap. The low-level mouse hook observes button transitions and
-always forwards input without rendering inside the callback. Per-monitor V2 DPI
+movement; the optional low-level keyboard hook observes activity without reading
+key data. Both always forward input without rendering inside the callback.
+Auto-hide fades use the layered window's constant alpha, preserving the selected
+color, opacity, and click feedback. Per-monitor V2 DPI
 awareness scales Settings on monitor changes. Halo dimensions remain fixed in
 physical pixels by default. When DPI sizing is enabled, a hidden, non-activating
 1-pixel window selects the cursor's monitor and `GetDpiForWindow` reads its current

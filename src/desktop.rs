@@ -1,4 +1,4 @@
-use crate::model::{ClickFeedback, Settings, render};
+use crate::model::{AutoHide, ClickFeedback, PresentationPreset, Settings, render};
 use std::{
     cell::{Cell, RefCell},
     mem::{size_of, zeroed},
@@ -32,7 +32,10 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
-const ID_SCALE_WITH_DPI: u16 = 111;
+const ID_PRESET_SLIDES: u16 = 111;
+const ID_PRESET_DEMO: u16 = 112;
+const ID_AUTO_HIDE: u16 = 113;
+const ID_SCALE_WITH_DPI: u16 = 114;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -109,14 +112,18 @@ struct App {
     halo: Cell<HWND>,
     dpi_probe: Cell<HWND>,
     hook: Cell<HHOOK>,
+    keyboard_hook: Cell<HHOOK>,
     font: Cell<HFONT>,
     controls: RefCell<Vec<Control>>,
     settings: RefCell<Settings>,
     settings_path: PathBuf,
     click: RefCell<ClickFeedback>,
+    auto_hide: RefCell<AutoHide>,
+    cursor_position: Cell<Option<(i32, i32)>>,
     start: Instant,
     rendered: Cell<f32>,
     rendered_diameter: Cell<u32>,
+    rendered_alpha: Cell<u8>,
     appearance_dirty: Cell<bool>,
     dirty: Cell<bool>,
     tray_added: Cell<bool>,
@@ -134,14 +141,18 @@ impl App {
             halo: Cell::new(null_mut()),
             dpi_probe: Cell::new(null_mut()),
             hook: Cell::new(null_mut()),
+            keyboard_hook: Cell::new(null_mut()),
             font: Cell::new(null_mut()),
             controls: RefCell::new(Vec::new()),
             settings: RefCell::new(settings),
             settings_path,
             click: RefCell::new(ClickFeedback::default()),
+            auto_hide: RefCell::new(AutoHide::new(0)),
+            cursor_position: Cell::new(None),
             start: Instant::now(),
             rendered: Cell::new(-1.0),
             rendered_diameter: Cell::new(0),
+            rendered_alpha: Cell::new(255),
             appearance_dirty: Cell::new(true),
             dirty: Cell::new(false),
             tray_added: Cell::new(false),
@@ -196,7 +207,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(490),
+                bottom: self.scale(590),
                 ..zeroed()
             };
             check(
@@ -257,6 +268,7 @@ impl App {
                 return Err(os_error("Observe mouse clicks"));
             }
             self.hook.set(hook);
+            self.set_auto_hide(self.settings.borrow().auto_hide)?;
             self.hotkey_registered.set(
                 RegisterHotKey(window, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'H' as u32) != 0,
             );
@@ -377,14 +389,35 @@ impl App {
             390,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_SIZE_LABEL, 24, 125, 390, 24)?;
+        self.add_control(w!("STATIC"), "Presentation presets", 0, 0, 24, 120, 160, 24)?;
+        self.add_control(
+            w!("BUTTON"),
+            "Slides",
+            WS_TABSTOP,
+            ID_PRESET_SLIDES,
+            194,
+            116,
+            100,
+            32,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
+            "Live demo",
+            WS_TABSTOP,
+            ID_PRESET_DEMO,
+            304,
+            116,
+            118,
+            32,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_SIZE_LABEL, 24, 185, 390, 24)?;
         let diameter = self.add_control(
             TRACKBAR_CLASSW,
             "",
             TBS_AUTOTICKS | WS_TABSTOP,
             ID_DIAMETER,
             24,
-            153,
+            213,
             398,
             35,
         )?;
@@ -394,44 +427,54 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_SCALE_WITH_DPI,
             24,
-            194,
+            254,
             398,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_OPACITY_LABEL, 24, 242, 390, 24)?;
+        self.add_control(w!("STATIC"), "", 0, ID_OPACITY_LABEL, 24, 302, 390, 24)?;
         let opacity = self.add_control(
             TRACKBAR_CLASSW,
             "",
             TBS_AUTOTICKS | WS_TABSTOP,
             ID_OPACITY,
             24,
-            270,
+            330,
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 326, 90, 24)?;
+        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 386, 90, 24)?;
         self.add_control(
             w!("BUTTON"),
             "",
             WS_TABSTOP | BS_OWNERDRAW as u32,
             ID_COLOR,
             124,
-            318,
+            378,
             190,
             33,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 370, 400, 60)?;
+        self.add_control(
+            w!("BUTTON"),
+            "Auto-hide when idle (1.5 s) or typing",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_AUTO_HIDE,
+            24,
+            424,
+            400,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 470, 400, 60)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            441,
+            541,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 441, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 541, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
@@ -530,6 +573,12 @@ impl App {
         self.text(ID_OPACITY_LABEL, &format!("Opacity: {}%", settings.opacity))?;
         self.text(ID_COLOR, &format!("{}   Choose...", settings.color_hex))?;
         unsafe {
+            for (id, value) in [
+                (ID_DIAMETER, settings.diameter),
+                (ID_OPACITY, settings.opacity),
+            ] {
+                SendMessageW(self.control(id), TBM_SETPOS, 1, value as isize);
+            }
             check(
                 InvalidateRect(self.control(ID_COLOR), null(), 0),
                 "Refresh color preview",
@@ -544,6 +593,12 @@ impl App {
                 self.control(ID_SCALE_WITH_DPI),
                 BM_SETCHECK,
                 usize::from(settings.scale_with_dpi),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_AUTO_HIDE),
+                BM_SETCHECK,
+                usize::from(settings.auto_hide),
                 0,
             );
         }
@@ -680,6 +735,14 @@ impl App {
                 let enabled =
                     unsafe { SendMessageW(self.control(ID_ENABLED), BM_GETCHECK, 0, 0) != 0 };
                 self.settings.borrow_mut().enabled = enabled;
+                self.auto_hide.replace(AutoHide::new(self.now()));
+                self.changed()?;
+            }
+            ID_AUTO_HIDE => {
+                let enabled =
+                    unsafe { SendMessageW(self.control(ID_AUTO_HIDE), BM_GETCHECK, 0, 0) != 0 };
+                self.set_auto_hide(enabled)?;
+                self.settings.borrow_mut().auto_hide = enabled;
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
@@ -688,6 +751,15 @@ impl App {
                     SendMessageW(self.control(ID_SCALE_WITH_DPI), BM_GETCHECK, 0, 0) != 0
                 };
                 self.settings.borrow_mut().scale_with_dpi = scale_with_dpi;
+                self.changed()?;
+            }
+            ID_PRESET_SLIDES | ID_PRESET_DEMO => {
+                let preset = if id == ID_PRESET_SLIDES {
+                    PresentationPreset::Slides
+                } else {
+                    PresentationPreset::LiveDemo
+                };
+                self.settings.borrow_mut().apply_preset(preset);
                 self.changed()?;
             }
             ID_HIDE => {
@@ -710,7 +782,34 @@ impl App {
             let mut settings = self.settings.borrow_mut();
             settings.enabled = !settings.enabled;
         }
+        self.auto_hide.replace(AutoHide::new(self.now()));
         self.changed()
+    }
+
+    fn set_auto_hide(&self, enabled: bool) -> Result<(), String> {
+        unsafe {
+            if enabled && self.keyboard_hook.get().is_null() {
+                let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), self.instance, 0);
+                if hook.is_null() {
+                    return Err(os_error("Observe keyboard activity for auto-hide"));
+                }
+                self.keyboard_hook.set(hook);
+            } else if !enabled && !self.keyboard_hook.get().is_null() {
+                check(
+                    UnhookWindowsHookEx(self.keyboard_hook.get()),
+                    "Remove keyboard activity observer",
+                )?;
+                self.keyboard_hook.set(null_mut());
+            }
+        }
+        self.auto_hide.replace(AutoHide::new(self.now()));
+        Ok(())
+    }
+
+    fn observe_movement(&self, x: i32, y: i32, now: u64) {
+        if self.cursor_position.replace(Some((x, y))) != Some((x, y)) {
+            self.auto_hide.borrow_mut().moved(now);
+        }
     }
 
     fn choose_color(&self) -> Result<(), String> {
@@ -798,6 +897,19 @@ impl App {
                     AppendMenuW(menu, MF_SEPARATOR, 0, null()),
                     "Add tray separator",
                 )?;
+                for (id, label) in [
+                    (ID_PRESET_SLIDES, w!("Slides preset")),
+                    (ID_PRESET_DEMO, w!("Live demo preset")),
+                ] {
+                    check(
+                        AppendMenuW(menu, MF_STRING, id as usize, label),
+                        "Add tray presentation preset",
+                    )?;
+                }
+                check(
+                    AppendMenuW(menu, MF_SEPARATOR, 0, null()),
+                    "Add tray preset separator",
+                )?;
                 check(
                     AppendMenuW(menu, MF_STRING, ID_EXIT as usize, w!("Exit")),
                     "Add tray exit item",
@@ -827,6 +939,10 @@ impl App {
     }
 
     fn tick(&self) -> Result<(), String> {
+        self.tick_at(self.now())
+    }
+
+    fn tick_at(&self, now: u64) -> Result<(), String> {
         let settings = self.settings.borrow().clone();
         if !settings.enabled {
             self.click.borrow_mut().reset();
@@ -836,25 +952,39 @@ impl App {
             self.appearance_dirty.set(true);
             return Ok(());
         }
-        let mut cursor = unsafe { zeroed() };
+        let mut cursor: POINT = unsafe { zeroed() };
         check(
             unsafe { GetCursorPos(&mut cursor) },
             "Get desktop cursor position",
         )?;
+        self.observe_movement(cursor.x, cursor.y, now);
+        let alpha = if settings.auto_hide {
+            self.auto_hide.borrow_mut().alpha(now)
+        } else {
+            255
+        };
+        if alpha == 0 {
+            unsafe {
+                ShowWindow(self.halo.get(), SW_HIDE);
+            }
+            return Ok(());
+        }
         let dpi = if settings.scale_with_dpi {
             self.cursor_dpi(cursor)?
         } else {
             96
         };
         let diameter = settings.pixel_diameter(dpi)?;
-        let amount = self.click.borrow().amount(self.now());
+        let amount = self.click.borrow().amount(now);
         if self.appearance_dirty.get()
             || self.rendered.get() != amount
+            || self.rendered_alpha.get() != alpha
             || self.rendered_diameter.get() != diameter
         {
             let pixels = render(&settings, amount, dpi)?;
-            self.upload(&pixels, diameter as i32 + 4, cursor)?;
+            self.upload(&pixels, diameter as i32 + 4, cursor, alpha)?;
             self.rendered.set(amount);
+            self.rendered_alpha.set(alpha);
             self.rendered_diameter.set(diameter);
             self.appearance_dirty.set(false);
         }
@@ -924,7 +1054,7 @@ impl App {
         }
     }
 
-    fn upload(&self, pixels: &[u8], size: i32, cursor: POINT) -> Result<(), String> {
+    fn upload(&self, pixels: &[u8], size: i32, cursor: POINT, alpha: u8) -> Result<(), String> {
         unsafe {
             let screen = GetDC(null_mut());
             if screen.is_null() {
@@ -964,7 +1094,7 @@ impl App {
                     let dimensions = SIZE { cx: size, cy: size };
                     let blend = BLENDFUNCTION {
                         BlendOp: AC_SRC_OVER as u8,
-                        SourceConstantAlpha: 255,
+                        SourceConstantAlpha: alpha,
                         AlphaFormat: AC_SRC_ALPHA as u8,
                         BlendFlags: 0,
                     };
@@ -1004,6 +1134,11 @@ impl Drop for App {
             if !self.hook.get().is_null() && UnhookWindowsHookEx(self.hook.get()) == 0 {
                 eprintln!("{}", os_error("Remove mouse hook"));
             }
+            if !self.keyboard_hook.get().is_null()
+                && UnhookWindowsHookEx(self.keyboard_hook.get()) == 0
+            {
+                eprintln!("{}", os_error("Remove keyboard hook"));
+            }
             if self.hotkey_registered.get() {
                 UnregisterHotKey(self.window.get(), 1);
             }
@@ -1030,6 +1165,10 @@ impl Drop for App {
 
 unsafe extern "system" fn mouse_proc(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
     if code >= 0 {
+        if message as u32 == WM_MOUSEMOVE {
+            let event = unsafe { &*(data as *const MSLLHOOKSTRUCT) };
+            with_app(|app| app.observe_movement(event.pt.x, event.pt.y, app.now()));
+        }
         let action = match message as u32 {
             WM_LBUTTONDOWN => Some((1, true)),
             WM_LBUTTONUP => Some((1, false)),
@@ -1048,6 +1187,19 @@ unsafe extern "system" fn mouse_proc(code: i32, message: WPARAM, data: LPARAM) -
         }
     }
     // This observer never suppresses input or performs rendering in the hook.
+    unsafe { CallNextHookEx(null_mut(), code, message, data) }
+}
+
+unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
+    if code >= 0 && matches!(message as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        with_app(|app| {
+            let settings = app.settings.borrow();
+            if settings.enabled && settings.auto_hide {
+                // Key identities and contents are neither read nor retained.
+                app.auto_hide.borrow_mut().typed(app.now());
+            }
+        });
+    }
     unsafe { CallNextHookEx(null_mut(), code, message, data) }
 }
 
@@ -1275,6 +1427,10 @@ fn native_checks() -> Result<(), String> {
                 !app.hook.get().is_null(),
                 "native low-level mouse hook installed",
             )?;
+            ensure(
+                app.keyboard_hook.get().is_null(),
+                "default behavior does not observe keyboard activity",
+            )?;
             ensure(app.tray_added.get(), "notification icon registered")?;
             ensure(
                 GetWindowLongPtrW(app.control(ID_COLOR), GWL_STYLE) as u32 & 0xF
@@ -1339,6 +1495,54 @@ fn native_checks() -> Result<(), String> {
                 "updates preserve focus",
             )?;
 
+            app.toggle()?;
+            for (id, preset) in [
+                (ID_PRESET_SLIDES, PresentationPreset::Slides),
+                (ID_PRESET_DEMO, PresentationPreset::LiveDemo),
+            ] {
+                SendMessageW(app.control(id), BM_CLICK, 0, 0);
+                let mut expected = Settings {
+                    enabled: false,
+                    ..Settings::default()
+                };
+                expected.apply_preset(preset);
+                ensure(
+                    *app.settings.borrow() == expected,
+                    "preset button changes appearance without enabling halo",
+                )?;
+                for (slider, value) in [
+                    (ID_DIAMETER, expected.diameter),
+                    (ID_OPACITY, expected.opacity),
+                ] {
+                    ensure(
+                        SendMessageW(app.control(slider), TBM_GETPOS, 0, 0) as u32 == value,
+                        "preset synchronizes manual sliders",
+                    )?;
+                }
+                app.save();
+                ensure(
+                    Settings::load(&path)? == expected,
+                    "preset values persist in existing settings file",
+                )?;
+                ensure(
+                    IsWindowVisible(app.halo.get()) == 0,
+                    "preset leaves disabled halo hidden",
+                )?;
+            }
+            app.toggle()?;
+            app.command(ID_PRESET_SLIDES)?;
+            check(
+                GetWindowRect(app.halo.get(), &mut rect),
+                "Get preset halo bounds",
+            )?;
+            ensure(
+                rect.right - rect.left == 64 && rect.bottom - rect.top == 64,
+                "preset immediately resizes enabled halo",
+            )?;
+            ensure(
+                GetForegroundWindow() == foreground,
+                "preset updates preserve focus",
+            )?;
             SendMessageW(app.control(ID_DIAMETER), TBM_SETPOS, 1, 120);
             SendMessageW(
                 app.window.get(),
@@ -1397,12 +1601,82 @@ fn native_checks() -> Result<(), String> {
             )?;
             SendMessageW(app.window.get(), WM_HOTKEY, 1, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().auto_hide && !app.keyboard_hook.get().is_null(),
+                "auto-hide checkbox installs keyboard activity observer",
+            )?;
+            let now = app.now();
+            app.auto_hide.replace(AutoHide::new(now));
+            app.tick_at(now + crate::model::IDLE_HIDE_MS)?;
+            ensure(
+                app.rendered_alpha.get() == 255,
+                "idle delay preserves full opacity before fading",
+            )?;
+            app.tick_at(now + crate::model::IDLE_HIDE_MS + 90)?;
+            ensure(
+                app.rendered_alpha.get() == 128,
+                "idle fade updates layered-window alpha",
+            )?;
+            app.tick_at(now + crate::model::IDLE_HIDE_MS + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) == 0,
+                "idle fade hides the halo",
+            )?;
+            app.auto_hide.replace(AutoHide::new(app.now()));
+            keyboard_proc(HC_ACTION as i32, WM_KEYUP as usize, 0);
+            app.tick_at(app.now() + 180)?;
+            ensure(
+                app.rendered_alpha.get() == 255,
+                "key release alone does not hide the halo",
+            )?;
+            app.auto_hide.replace(AutoHide::new(app.now()));
+            keyboard_proc(HC_ACTION as i32, WM_KEYDOWN as usize, 0);
+            app.tick_at(app.now() + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) == 0,
+                "activity-only keyboard callback fades out the halo",
+            )?;
+            let now = app.now() + 180;
+            app.cursor_position
+                .set(Some((cursor.x.wrapping_add(1), cursor.y)));
+            let event = MSLLHOOKSTRUCT {
+                pt: cursor,
+                ..zeroed()
+            };
+            mouse_proc(
+                HC_ACTION as i32,
+                WM_MOUSEMOVE as usize,
+                &event as *const _ as isize,
+            );
+            app.tick_at(now + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) != 0 && app.rendered_alpha.get() == 255,
+                "mouse movement restores full opacity",
+            )?;
+            app.auto_hide.replace(AutoHide::new(app.now()));
+            keyboard_proc(HC_ACTION as i32, WM_SYSKEYDOWN as usize, 0);
+            app.tick_at(app.now() + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) == 0,
+                "system-key activity also hides the halo",
+            )?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
+            ensure(
+                !app.settings.borrow().auto_hide
+                    && app.keyboard_hook.get().is_null()
+                    && app.rendered_alpha.get() == 255
+                    && IsWindowVisible(app.halo.get()) != 0,
+                "disabling auto-hide removes keyboard observer and restores halo",
+            )?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
             app.command(ID_HIDE)?;
             ensure(IsWindowVisible(app.window.get()) == 0, "hide to tray")?;
             ensure(
                 Settings::load(&path)? == *app.settings.borrow(),
                 "UI settings persistence",
             )?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
 
             let old_dpi = app.dpi.get();
             for dpi in [96, 144, 192] {
@@ -1735,7 +2009,64 @@ mod tests {
                 ..zeroed()
             };
             assert_ne!(RegisterClassW(&class), 0);
+            let settings_class = WNDCLASSW {
+                lpfnWndProc: Some(settings_proc),
+                hInstance: app.instance,
+                lpszClassName: SETTINGS_CLASS,
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&settings_class), 0);
             let foreground = GetForegroundWindow();
+            let common = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_BAR_CLASSES | ICC_STANDARD_CLASSES,
+            };
+            assert_ne!(InitCommonControlsEx(&common), 0);
+            app.window.set(CreateWindowExW(
+                WS_EX_CONTROLPARENT,
+                SETTINGS_CLASS,
+                w!("Hidden settings layout check"),
+                WS_POPUP,
+                0,
+                0,
+                450,
+                590,
+                null_mut(),
+                null_mut(),
+                app.instance,
+                null(),
+            ));
+            assert!(!app.window.get().is_null());
+            app.add_controls().unwrap();
+            app.update_labels().unwrap();
+            for dpi in [96, 144, 192] {
+                app.dpi.set(dpi);
+                app.layout().unwrap();
+                let mut previous_bottom = 0;
+                for id in [
+                    ID_PRESET_SLIDES,
+                    ID_SIZE_LABEL,
+                    ID_DIAMETER,
+                    ID_SCALE_WITH_DPI,
+                    ID_OPACITY_LABEL,
+                    ID_OPACITY,
+                    ID_COLOR,
+                    ID_AUTO_HIDE,
+                    ID_STATUS,
+                    ID_HIDE,
+                ] {
+                    let control = app.control(id);
+                    assert!(!control.is_null());
+                    assert_eq!(GetDlgCtrlID(control), id as i32);
+                    let mut bounds: RECT = zeroed();
+                    assert_ne!(GetWindowRect(control, &mut bounds), 0);
+                    assert!(bounds.top >= previous_bottom);
+                    previous_bottom = bounds.bottom;
+                    assert!(bounds.bottom <= app.scale(590));
+                }
+            }
+            app.dpi.set(96);
+            assert_eq!(IsWindowVisible(app.window.get()), 0);
             let mut monitors = Vec::<RECT>::new();
             assert_ne!(
                 EnumDisplayMonitors(

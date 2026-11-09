@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+#[derive(Clone, Copy, Debug)]
+pub enum PresentationPreset {
+    Slides,
+    LiveDemo,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Settings {
@@ -9,6 +15,7 @@ pub struct Settings {
     pub color_hex: String,
     pub enabled: bool,
     pub scale_with_dpi: bool,
+    pub auto_hide: bool,
 }
 
 impl Default for Settings {
@@ -19,6 +26,7 @@ impl Default for Settings {
             color_hex: "#FFD43B".into(),
             enabled: true,
             scale_with_dpi: false,
+            auto_hide: false,
         }
     }
 }
@@ -37,6 +45,16 @@ impl Settings {
             .and_then(|value| value.checked_add(48))
             .map(|value| (value / 96).max(1))
             .ok_or_else(|| "The scaled halo diameter is too large.".into())
+    }
+
+    pub fn apply_preset(&mut self, preset: PresentationPreset) {
+        let (diameter, opacity, color) = match preset {
+            PresentationPreset::Slides => (60, 20, "#FFD43B"),
+            PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
+        };
+        self.diameter = diameter;
+        self.opacity = opacity;
+        self.color_hex = color.into();
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -104,6 +122,53 @@ impl Settings {
                 .map_err(|e| format!("Failed to clean up settings temp file: {e}"))?;
         }
         result
+    }
+}
+
+pub const IDLE_HIDE_MS: u64 = 1500;
+const FADE_MS: u64 = 180;
+
+pub struct AutoHide {
+    last_moved: u64,
+    typing: bool,
+    updated_at: u64,
+    visibility: f32,
+}
+
+impl AutoHide {
+    pub fn new(now: u64) -> Self {
+        Self {
+            last_moved: now,
+            typing: false,
+            updated_at: now,
+            visibility: 1.0,
+        }
+    }
+
+    pub fn moved(&mut self, now: u64) {
+        self.alpha(now);
+        self.last_moved = now;
+        self.typing = false;
+    }
+
+    pub fn typed(&mut self, now: u64) {
+        self.alpha(now);
+        self.typing = true;
+    }
+
+    pub fn alpha(&mut self, now: u64) -> u8 {
+        let hidden = self.typing || now.saturating_sub(self.last_moved) >= IDLE_HIDE_MS;
+        // Only time after the idle deadline contributes to the fade.
+        let since = if hidden && !self.typing {
+            self.updated_at
+                .max(self.last_moved.saturating_add(IDLE_HIDE_MS))
+        } else {
+            self.updated_at
+        };
+        let step = now.saturating_sub(since) as f32 / FADE_MS as f32;
+        self.visibility = (self.visibility + if hidden { -step } else { step }).clamp(0.0, 1.0);
+        self.updated_at = now;
+        (self.visibility * 255.0).round() as u8
     }
 }
 
@@ -194,6 +259,7 @@ mod tests {
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
         assert!(!value.scale_with_dpi);
+        assert!(!value.auto_hide);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
@@ -307,6 +373,92 @@ mod tests {
     }
 
     #[test]
+    fn presentation_presets_preserve_enabled_and_allow_customization() {
+        for (enabled, auto_hide, scale_with_dpi) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, false),
+            (false, true, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let mut settings = Settings {
+                enabled,
+                auto_hide,
+                scale_with_dpi,
+                ..Settings::default()
+            };
+            for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
+                settings.apply_preset(preset);
+                settings.validate().unwrap();
+                assert_eq!(settings.enabled, enabled);
+                assert_eq!(settings.auto_hide, auto_hide);
+                assert_eq!(settings.scale_with_dpi, scale_with_dpi);
+                let expected = match preset {
+                    PresentationPreset::Slides => (60, 20, "#FFD43B"),
+                    PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
+                };
+                assert_eq!(
+                    (
+                        settings.diameter,
+                        settings.opacity,
+                        settings.color_hex.as_str()
+                    ),
+                    expected
+                );
+                assert_eq!(
+                    settings.pixel_diameter(192).unwrap(),
+                    expected.0 * if scale_with_dpi { 2 } else { 1 }
+                );
+                let text = serde_json::to_string(&settings).unwrap();
+                assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), settings);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .len(),
+                    6
+                );
+                settings.diameter = 97;
+                settings.opacity = 31;
+                settings.color_hex = "#123456".into();
+                settings.validate().unwrap();
+                assert_eq!(settings.diameter, 97);
+                assert_eq!(settings.opacity, 31);
+                assert_eq!(settings.rgb().unwrap(), [18, 52, 86]);
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_presets_persist_with_existing_settings_schema() {
+        let dir =
+            std::env::temp_dir().join(format!("CursorHighlighter.Presets-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let mut settings = Settings {
+            enabled: false,
+            auto_hide: true,
+            scale_with_dpi: true,
+            ..Settings::default()
+        };
+        for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
+            settings.apply_preset(preset);
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap(), settings);
+            settings.diameter = 97;
+            settings.opacity = 31;
+            settings.color_hex = "#123456".into();
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap(), settings);
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
     fn atomic_settings_round_trip_and_corruption() {
         let dir =
             std::env::temp_dir().join(format!("CursorHighlighter.Rust-{}", std::process::id()));
@@ -317,6 +469,7 @@ mod tests {
             diameter: 137,
             enabled: false,
             scale_with_dpi: true,
+            auto_hide: true,
             ..Settings::default()
         };
         settings.save(&path).unwrap();
@@ -330,6 +483,42 @@ mod tests {
         assert!(Settings::load(&path).is_err());
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn auto_hide_idle_typing_and_movement() {
+        let mut hide = AutoHide::new(0);
+        assert_eq!(hide.alpha(1499), 255);
+        assert_eq!(hide.alpha(1500), 255);
+        assert_eq!(hide.alpha(1590), 128);
+        assert_eq!(hide.alpha(1680), 0);
+        hide.moved(1680);
+        assert_eq!(hide.alpha(1770), 128);
+        assert_eq!(hide.alpha(1860), 255);
+        hide.typed(1860);
+        assert_eq!(hide.alpha(1950), 128);
+        hide.typed(1950);
+        assert_eq!(hide.alpha(2040), 0);
+        assert_eq!(hide.alpha(10000), 0);
+        hide.moved(10000);
+        assert_eq!(hide.alpha(10180), 255);
+        hide.moved(11000);
+        assert_eq!(hide.alpha(12499), 255);
+        assert_eq!(hide.alpha(12680), 0);
+    }
+
+    #[test]
+    fn auto_hide_events_do_not_apply_past_time_to_new_target() {
+        let mut hide = AutoHide::new(100);
+        hide.typed(1000);
+        assert_eq!(hide.alpha(1000), 255);
+        assert_eq!(hide.alpha(1180), 0);
+        hide.moved(10000);
+        assert_eq!(hide.alpha(10000), 0);
+        assert_eq!(hide.alpha(10180), 255);
+        let mut reset = AutoHide::new(20000);
+        assert_eq!(reset.alpha(21500), 255);
+        assert_eq!(reset.alpha(21680), 0);
     }
 
     #[test]
