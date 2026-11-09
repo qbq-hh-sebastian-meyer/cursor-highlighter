@@ -15,6 +15,17 @@ and launch `cursor-highlighter.exe`. No Rust or .NET installation is needed.
 Each archive has a matching `.sha256` file. The executables are not code-signed;
 Windows SmartScreen may show an unknown-publisher warning.
 
+### What's new in v0.2.0
+
+This release includes all seven feature additions: optional idle/typing
+auto-hide, distinct left/right click colors, configurable shortcuts with
+hold-to-highlight mode, an outline-only halo, Slides and Live demo presets,
+monitor-DPI-aware sizing, and start-hidden/per-user login startup options.
+Existing settings remain compatible. All optional modes and startup options
+remain off by default; the original filled halo and Ctrl + Alt + H toggle
+remain the defaults. Launch at Windows login changes only when explicitly
+selected in Settings.
+
 ## Run
 
 Double-click `Run.cmd` in `C:\Projects\cursor-highlighter` to build and launch.
@@ -192,11 +203,11 @@ To publish a GitHub Release, update `version` in `Cargo.toml`, regenerate
 matching version tag:
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-Replace `v0.1.0` with the package version being released. A tag must exactly match
+Replace `v0.2.0` with the package version being released. A tag must exactly match
 `v` followed by the Cargo package version. After both builds pass, the workflow
 creates a GitHub Release with generated notes and attaches both architecture
 packages and their checksums. Untagged/manual runs build artifacts without
