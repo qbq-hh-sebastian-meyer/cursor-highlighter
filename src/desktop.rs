@@ -32,6 +32,7 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
+const ID_CLICK_COLORS: u16 = 111;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -107,6 +108,7 @@ struct App {
     click: RefCell<ClickFeedback>,
     start: Instant,
     rendered: Cell<f32>,
+    rendered_colors: Cell<[f32; 2]>,
     appearance_dirty: Cell<bool>,
     dirty: Cell<bool>,
     tray_added: Cell<bool>,
@@ -130,6 +132,7 @@ impl App {
             click: RefCell::new(ClickFeedback::default()),
             start: Instant::now(),
             rendered: Cell::new(-1.0),
+            rendered_colors: Cell::new([0.0; 2]),
             appearance_dirty: Cell::new(true),
             dirty: Cell::new(false),
             tray_added: Cell::new(false),
@@ -184,7 +187,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(450),
+                bottom: self.scale(490),
                 ..zeroed()
             };
             check(
@@ -398,18 +401,28 @@ impl App {
             190,
             33,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 330, 400, 60)?;
+        self.add_control(
+            w!("BUTTON"),
+            "Distinct clicks: blue left / orange right",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_CLICK_COLORS,
+            24,
+            324,
+            400,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 370, 400, 60)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            401,
+            441,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 401, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 441, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
@@ -502,6 +515,12 @@ impl App {
                 self.control(ID_ENABLED),
                 BM_SETCHECK,
                 usize::from(settings.enabled),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_CLICK_COLORS),
+                BM_SETCHECK,
+                usize::from(settings.distinct_click_colors),
                 0,
             );
         }
@@ -641,6 +660,12 @@ impl App {
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
+            ID_CLICK_COLORS => {
+                let enabled =
+                    unsafe { SendMessageW(self.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) != 0 };
+                self.settings.borrow_mut().distinct_click_colors = enabled;
+                self.changed()?;
+            }
             ID_HIDE => {
                 self.save();
                 unsafe {
@@ -787,11 +812,21 @@ impl App {
             self.appearance_dirty.set(true);
             return Ok(());
         }
-        let amount = self.click.borrow().amount(self.now());
-        if self.appearance_dirty.get() || self.rendered.get() != amount {
-            let pixels = render(&settings, amount)?;
+        let now = self.now();
+        let amount = self.click.borrow().amount(now);
+        let colors = if settings.distinct_click_colors {
+            self.click.borrow().color_amounts(now)
+        } else {
+            [0.0; 2]
+        };
+        if self.appearance_dirty.get()
+            || self.rendered.get() != amount
+            || self.rendered_colors.get() != colors
+        {
+            let pixels = render(&settings, amount, colors)?;
             self.upload(&pixels, settings.diameter as i32 + 4)?;
             self.rendered.set(amount);
+            self.rendered_colors.set(colors);
             self.appearance_dirty.set(false);
         }
         unsafe {
@@ -1256,6 +1291,30 @@ fn native_checks() -> Result<(), String> {
             )?;
             SendMessageW(app.window.get(), WM_HOTKEY, 1, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
+            ensure(
+                SendMessageW(app.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) == 0,
+                "distinct click colors default off",
+            )?;
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().distinct_click_colors,
+                "distinct click colors checkbox notification",
+            )?;
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONDOWN as usize, 0);
+            app.tick()?;
+            ensure(app.rendered_colors.get() == [1.0, 0.0], "left click color")?;
+            mouse_proc(HC_ACTION as i32, WM_RBUTTONDOWN as usize, 0);
+            app.tick()?;
+            ensure(
+                app.rendered_colors.get() == [1.0; 2],
+                "overlapping click colors",
+            )?;
+            app.toggle()?;
+            app.toggle()?;
+            ensure(
+                app.rendered_colors.get() == [0.0; 2],
+                "disable clears click colors",
+            )?;
             app.command(ID_HIDE)?;
             ensure(IsWindowVisible(app.window.get()) == 0, "hide to tray")?;
             ensure(

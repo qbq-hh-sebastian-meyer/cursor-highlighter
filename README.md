@@ -39,6 +39,11 @@ machine or use the MSVC cross-compilation instructions below.
   darken the selected color. It stays pressed during a drag and smoothly returns
   to normal after release. Even quick clicks remain visible briefly. Input is
   always forwarded to the underlying application.
+- **Distinct clicks: blue left / orange right** optionally tints left clicks blue
+  (`#3388FF`) and right clicks orange (`#FF6633`), retaining squash/darken feedback.
+  Holding both shows blue on the left half and orange on the right half; each
+  color fades independently after release. Middle clicks keep the usual feedback.
+  This mode is off by default, preserving the existing appearance.
 - **Ctrl + Alt + H** toggles the halo even while Settings is hidden. If another
   application owns the shortcut, Settings shows a warning; the checkbox and tray
   menu still work.
@@ -55,6 +60,8 @@ and PascalCase JSON fields have not changed. Corrupt/unreadable files show a
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
 replaced.
+The optional click-color mode is stored as the `DistinctClickColors` boolean;
+older settings files without it keep the default click feedback.
 
 Only one app instance is allowed per Windows session. Exit any older C# build
 before starting the Rust build; they intentionally share the same instance guard.
@@ -142,7 +149,8 @@ cargo run --locked -- --self-test
 
 Unit tests cover C# settings compatibility, validation, atomic persistence,
 click/release/overlapping-button timing, alpha, color darkening, deformation,
-and premultiplied rendering across sizes and opacity values.
+independent left/right color timing, optional/simultaneous click colors, and
+premultiplied rendering across sizes and opacity values.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and

@@ -8,6 +8,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub distinct_click_colors: bool,
 }
 
 impl Default for Settings {
@@ -17,6 +18,7 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            distinct_click_colors: false,
         }
     }
 }
@@ -92,14 +94,45 @@ impl Settings {
 
 #[derive(Default)]
 pub struct ClickFeedback {
+    combined: PressFeedback,
+    left: PressFeedback,
+    right: PressFeedback,
+}
+
+impl ClickFeedback {
+    pub fn button(&mut self, mask: u8, down: bool, now: u64) {
+        self.combined.button(mask, down, now);
+        if mask & 1 != 0 {
+            self.left.button(1, down, now);
+        }
+        if mask & 2 != 0 {
+            self.right.button(2, down, now);
+        }
+    }
+
+    pub fn amount(&self, now: u64) -> f32 {
+        self.combined.amount(now)
+    }
+
+    pub fn color_amounts(&self, now: u64) -> [f32; 2] {
+        [self.left.amount(now), self.right.amount(now)]
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Default)]
+struct PressFeedback {
     buttons: u8,
     pressed_at: u64,
     released_at: u64,
     active: bool,
 }
 
-impl ClickFeedback {
-    pub fn button(&mut self, mask: u8, down: bool, now: u64) {
+impl PressFeedback {
+    fn button(&mut self, mask: u8, down: bool, now: u64) {
         let was_held = self.buttons != 0;
         if down {
             self.buttons |= mask;
@@ -114,7 +147,7 @@ impl ClickFeedback {
         }
     }
 
-    pub fn amount(&self, now: u64) -> f32 {
+    fn amount(&self, now: u64) -> f32 {
         if !self.active {
             return 0.0;
         }
@@ -124,14 +157,14 @@ impl ClickFeedback {
         let progress = ((now - self.released_at) as f32 / 180.0).clamp(0.0, 1.0);
         1.0 - progress * progress * (3.0 - 2.0 * progress)
     }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
 }
 
 // A top-down premultiplied BGRA image, directly suitable for UpdateLayeredWindow.
-pub fn render(settings: &Settings, feedback: f32) -> Result<Vec<u8>, String> {
+pub fn render(
+    settings: &Settings,
+    feedback: f32,
+    color_amounts: [f32; 2],
+) -> Result<Vec<u8>, String> {
     settings.validate()?;
     let rgb = settings.rgb()?;
     let amount = feedback.clamp(0.0, 1.0);
@@ -143,6 +176,19 @@ pub fn render(settings: &Settings, feedback: f32) -> Result<Vec<u8>, String> {
     let mut pixels = vec![0; size * size * 4];
     for y in 0..size {
         for x in 0..size {
+            let mut color = rgb.map(f32::from);
+            if settings.distinct_click_colors {
+                let [left, right] = color_amounts.map(|amount| amount.clamp(0.0, 1.0));
+                // Split simultaneous clicks into blue/orange halves instead of mixing colors.
+                let (tint, strength) = if left > 0.0 && (right == 0.0 || x < size / 2) {
+                    ([51.0, 136.0, 255.0], left)
+                } else {
+                    ([255.0, 102.0, 51.0], right)
+                };
+                for channel in 0..3 {
+                    color[channel] += (tint[channel] - color[channel]) * strength;
+                }
+            }
             let mut covered = 0;
             for sy in 0..4 {
                 for sx in 0..4 {
@@ -154,8 +200,7 @@ pub fn render(settings: &Settings, feedback: f32) -> Result<Vec<u8>, String> {
             let alpha = (255.0 * settings.opacity as f32 / 100.0 * covered as f32 / 16.0).round();
             let pixel = &mut pixels[(y * size + x) * 4..][..4];
             for channel in 0..3 {
-                pixel[channel] =
-                    (rgb[2 - channel] as f32 * brightness * alpha / 255.0).round() as u8;
+                pixel[channel] = (color[2 - channel] * brightness * alpha / 255.0).round() as u8;
             }
             pixel[3] = alpha as u8;
         }
@@ -176,6 +221,7 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.distinct_click_colors);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
@@ -228,6 +274,7 @@ mod tests {
         let mut settings = Settings {
             diameter: 137,
             enabled: false,
+            distinct_click_colors: true,
             ..Settings::default()
         };
         settings.save(&path).unwrap();
@@ -265,6 +312,88 @@ mod tests {
     }
 
     #[test]
+    fn distinct_button_timing_fades_independently_and_resets() {
+        let mut click = ClickFeedback::default();
+        assert_eq!(click.color_amounts(0), [0.0; 2]);
+        click.button(1, true, 100);
+        click.button(1, false, 110);
+        click.button(2, true, 130);
+        assert_eq!(click.color_amounts(220), [1.0, 1.0]);
+        assert_eq!(click.color_amounts(310), [0.5, 1.0]);
+        assert_eq!(click.color_amounts(400), [0.0, 1.0]);
+        click.button(4, true, 400);
+        click.button(2, false, 410);
+        assert_eq!(click.color_amounts(500), [0.0, 0.5]);
+        assert_eq!(click.amount(590), 1.0);
+        assert_eq!(click.color_amounts(590), [0.0; 2]);
+        click.button(1, true, 600);
+        click.button(2, true, 610);
+        assert_eq!(click.color_amounts(1000), [1.0; 2]);
+        click.reset();
+        assert_eq!(click.color_amounts(1000), [0.0; 2]);
+        assert_eq!(click.amount(1000), 0.0);
+    }
+
+    #[test]
+    fn distinct_colors_are_optional_fade_and_preserve_alpha() {
+        for diameter in [24, 80, 240] {
+            for opacity in [5, 35, 80] {
+                let mut settings = Settings {
+                    diameter,
+                    opacity,
+                    ..Settings::default()
+                };
+                let classic = render(&settings, 1.0, [0.0; 2]).unwrap();
+                assert_eq!(render(&settings, 1.0, [1.0; 2]).unwrap(), classic);
+                settings.distinct_click_colors = true;
+                let left = render(&settings, 1.0, [1.0, 0.0]).unwrap();
+                let right = render(&settings, 1.0, [0.0, 1.0]).unwrap();
+                let both = render(&settings, 1.0, [1.0; 2]).unwrap();
+                let fading = render(&settings, 1.0, [0.5, 0.0]).unwrap();
+                assert_eq!(render(&settings, 1.0, [0.0; 2]).unwrap(), classic);
+                let size = diameter as usize + 4;
+                let center = (size / 2 * size + size / 2) * 4;
+                assert!(left[center] > left[center + 2]);
+                assert!(right[center + 2] > right[center]);
+                for (pixels, tint) in [
+                    (&left, [255.0, 136.0, 51.0]),
+                    (&right, [51.0, 102.0, 255.0]),
+                ] {
+                    for channel in 0..3 {
+                        let expected = tint[channel] * 0.65 * classic[center + 3] as f32 / 255.0;
+                        assert!((pixels[center + channel] as f32 - expected).abs() <= 1.0);
+                    }
+                }
+                for channel in 0..3 {
+                    let expected =
+                        (classic[center + channel] as f32 + left[center + channel] as f32) / 2.0;
+                    assert!((fading[center + channel] as f32 - expected).abs() <= 1.0);
+                }
+                for (index, pixel) in both.as_chunks::<4>().0.iter().enumerate() {
+                    let offset = index * 4;
+                    let expected = if index % size < size / 2 {
+                        &left
+                    } else {
+                        &right
+                    };
+                    assert_eq!(pixel, &expected[offset..offset + 4]);
+                }
+                for pixels in [&left, &right, &both, &fading] {
+                    for (pixel, original) in pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(classic.as_chunks::<4>().0)
+                    {
+                        assert_eq!(pixel[3], original[3]);
+                        assert!(pixel[..3].iter().all(|&channel| channel <= pixel[3]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn render_transparency_premultiplication_and_deformation() {
         for diameter in [24, 80, 240] {
             for opacity in [5, 35, 80] {
@@ -273,8 +402,8 @@ mod tests {
                     opacity,
                     ..Settings::default()
                 };
-                let normal = render(&settings, 0.0).unwrap();
-                let pressed = render(&settings, 1.0).unwrap();
+                let normal = render(&settings, 0.0, [0.0; 2]).unwrap();
+                let pressed = render(&settings, 1.0, [0.0; 2]).unwrap();
                 let size = diameter as usize + 4;
                 let center = (size / 2 * size + size / 2) * 4;
                 assert_eq!(normal.len(), size * size * 4);
