@@ -1,6 +1,114 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum ActivationMode {
+    #[default]
+    Toggle,
+    Hold,
+}
+
+impl ActivationMode {
+    pub fn visible(self, enabled: bool, held: bool) -> bool {
+        enabled && (self == Self::Toggle || held)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct Shortcut {
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub win: bool,
+    pub key: u32,
+}
+
+impl Default for Shortcut {
+    fn default() -> Self {
+        Self {
+            control: true,
+            alt: true,
+            shift: false,
+            win: false,
+            key: b'H' as u32,
+        }
+    }
+}
+
+impl Shortcut {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.control || self.alt || self.win)
+            || !((b'A' as u32..=b'Z' as u32).contains(&self.key)
+                || (b'0' as u32..=b'9' as u32).contains(&self.key)
+                || (0x70..=0x87).contains(&self.key))
+        {
+            return Err("Use Ctrl, Alt or Win (optionally Shift) with A-Z, 0-9 or F1-F24.".into());
+        }
+        Ok(())
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut shortcut = Self {
+            control: false,
+            alt: false,
+            shift: false,
+            win: false,
+            key: 0,
+        };
+        for part in text.split('+').map(|part| part.trim().to_ascii_uppercase()) {
+            let modifier = match part.as_str() {
+                "CTRL" => Some(&mut shortcut.control),
+                "ALT" => Some(&mut shortcut.alt),
+                "SHIFT" => Some(&mut shortcut.shift),
+                "WIN" => Some(&mut shortcut.win),
+                _ => None,
+            };
+            if let Some(value) = modifier {
+                if *value {
+                    return Err("A shortcut modifier cannot be repeated.".into());
+                }
+                *value = true;
+            } else {
+                if shortcut.key != 0 {
+                    return Err("Specify exactly one shortcut key.".into());
+                }
+                shortcut.key = match part.as_bytes() {
+                    [key] if key.is_ascii_uppercase() || key.is_ascii_digit() => *key as u32,
+                    _ => part
+                        .strip_prefix('F')
+                        .and_then(|number| number.parse::<u32>().ok())
+                        .filter(|number| (1..=24).contains(number))
+                        .map(|number| 0x6F + number)
+                        .ok_or("Use a letter, digit or F1-F24 as the shortcut key.")?,
+                };
+            }
+        }
+        shortcut.validate()?;
+        Ok(shortcut)
+    }
+
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        for (active, name) in [
+            (self.control, "Ctrl"),
+            (self.alt, "Alt"),
+            (self.shift, "Shift"),
+            (self.win, "Win"),
+        ] {
+            if active {
+                parts.push(name.to_string());
+            }
+        }
+        parts.push(if (0x70..=0x87).contains(&self.key) {
+            format!("F{}", self.key - 0x6F)
+        } else {
+            char::from_u32(self.key).unwrap_or('?').to_string()
+        });
+        parts.join(" + ")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Settings {
@@ -8,6 +116,8 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub shortcut: Shortcut,
+    pub activation_mode: ActivationMode,
 }
 
 impl Default for Settings {
@@ -17,6 +127,8 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            shortcut: Shortcut::default(),
+            activation_mode: ActivationMode::default(),
         }
     }
 }
@@ -26,6 +138,7 @@ impl Settings {
         if !(24..=240).contains(&self.diameter) || !(5..=80).contains(&self.opacity) {
             return Err("Settings require a diameter of 24-240 px and opacity of 5-80%.".into());
         }
+        self.shortcut.validate()?;
         self.rgb().map(|_| ())
     }
 
@@ -176,12 +289,83 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert_eq!(value.shortcut, Shortcut::default());
+        assert_eq!(value.activation_mode, ActivationMode::Toggle);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
         );
         assert!(serde_json::from_str::<Settings>("null").is_err());
         assert!(serde_json::from_str::<Settings>(r#"{"Diameter":-1}"#).is_err());
+    }
+
+    #[test]
+    fn shortcut_parsing_validation_and_labels() {
+        assert_eq!(
+            Shortcut::parse(" ctrl + alt + h ").unwrap(),
+            Shortcut::default()
+        );
+        for key in ["A", "Z", "0", "9", "F1", "F24"] {
+            let shortcut = Shortcut::parse(&format!("Win + Shift + {key}")).unwrap();
+            shortcut.validate().unwrap();
+            assert_eq!(Shortcut::parse(&shortcut.label()).unwrap(), shortcut);
+        }
+        for text in [
+            "",
+            "H",
+            "Shift + H",
+            "Ctrl",
+            "Ctrl +",
+            "Ctrl + + H",
+            "Ctrl + Ctrl + H",
+            "Ctrl + H + J",
+            "Ctrl + F0",
+            "Alt + F25",
+            "Ctrl + Space",
+            "Ctrl + 💛",
+        ] {
+            assert!(Shortcut::parse(text).is_err(), "{text}");
+        }
+        for key in [0, 0x20, 0x6F, 0x88, u32::MAX] {
+            assert!(
+                Shortcut {
+                    key,
+                    ..Shortcut::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn activation_modes_preserve_toggle_and_gate_hold_visibility() {
+        for enabled in [false, true] {
+            for held in [false, true] {
+                assert_eq!(ActivationMode::Toggle.visible(enabled, held), enabled);
+                assert_eq!(ActivationMode::Hold.visible(enabled, held), enabled && held);
+            }
+        }
+    }
+
+    #[test]
+    fn activation_settings_round_trip_and_invalid_json() {
+        let settings = Settings {
+            shortcut: Shortcut::parse("Ctrl + Shift + F24").unwrap(),
+            activation_mode: ActivationMode::Hold,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""ActivationMode":"Hold""#));
+        assert!(json.contains(r#""Shortcut":{"Control":true"#));
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
+        assert!(serde_json::from_str::<Settings>(r#"{"ActivationMode":"Unknown"}"#).is_err());
+        assert!(
+            serde_json::from_str::<Settings>(r#"{"Shortcut":{"Key":0}}"#)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
@@ -228,6 +412,8 @@ mod tests {
         let mut settings = Settings {
             diameter: 137,
             enabled: false,
+            activation_mode: ActivationMode::Hold,
+            shortcut: Shortcut::parse("Alt + Shift + F13").unwrap(),
             ..Settings::default()
         };
         settings.save(&path).unwrap();

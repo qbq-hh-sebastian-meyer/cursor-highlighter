@@ -39,9 +39,20 @@ machine or use the MSVC cross-compilation instructions below.
   darken the selected color. It stays pressed during a drag and smoothly returns
   to normal after release. Even quick clicks remain visible briefly. Input is
   always forwarded to the underlying application.
-- **Ctrl + Alt + H** toggles the halo even while Settings is hidden. If another
-  application owns the shortcut, Settings shows a warning; the checkbox and tray
-  menu still work.
+- **Shortcut:** defaults to **Ctrl + Alt + H**, which toggles the halo even while
+  Settings is hidden. Enter a chord such as `Ctrl + Shift + F9` and click
+  **Apply** to change it. Use Ctrl, Alt, or Win (optionally Shift) with a letter,
+  digit, or F1-F24. Windows may reserve some combinations (including F12 and
+  many Win shortcuts). Invalid or unavailable shortcuts show an error in Settings
+  and leave the previous shortcut and saved settings unchanged. If the saved
+  shortcut is unavailable at startup, choose another or use the checkbox/tray
+  in toggle mode.
+- **Hold shortcut to highlight (instead of toggle):** with **Highlight cursor**
+  enabled, shows the halo only while the whole shortcut is held. Releasing any
+  required key hides it on the next frame (about 16 ms). The checkbox and tray
+  menu enable/disable highlighting; they do not latch the halo on in hold mode.
+  Switching modes clears any temporary hold. Holding the shortcut never changes
+  the saved enabled state. Toggle mode remains the default.
 - **Hide to tray** leaves the halo running. Double-click the notification icon or
   right-click it and select **Settings** to reopen the window.
 - **Exit**, the tray's **Exit**, or closing Settings stops the app. Minimizing
@@ -51,7 +62,9 @@ Defaults: 80 px diameter, yellow (`#FFD43B`), 35% opacity.
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
-and PascalCase JSON fields have not changed. Corrupt/unreadable files show a
+and existing PascalCase JSON fields have not changed. The additive `Shortcut`
+and `ActivationMode` fields default to Ctrl+Alt+H and `Toggle` when absent.
+Corrupt/unreadable files show a
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
 replaced.
@@ -140,9 +153,13 @@ cargo test --locked
 cargo run --locked -- --self-test
 ```
 
-Unit tests cover C# settings compatibility, validation, atomic persistence,
+Unit tests cover C# settings compatibility, shortcut parsing and validation,
+activation-mode visibility and chord release, atomic persistence,
 click/release/overlapping-button timing, alpha, color darkening, deformation,
 and premultiplied rendering across sizes and opacity values.
+They also use hidden native windows and unused extended-function-key chords to
+check shortcut conflicts, replacement, settings controls, and hold dispatch,
+without injecting keyboard input or touching the running app or user settings.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
@@ -174,6 +191,12 @@ always forwards input without rendering inside the callback. Per-monitor V2 DPI
 awareness keeps halo dimensions in physical pixels and scales Settings on monitor
 changes. Negative desktop coordinates are supported; the halo clips naturally at
 display edges.
+
+Shortcuts use Windows global hotkey registration with repeat suppression.
+Replacement shortcuts are registered before the old registration is released,
+so a conflict does not disable a working shortcut. Hold mode uses the existing
+frame timer to inspect only the configured chord's current key states after a
+hotkey activation; it installs no keyboard hook and records no keystroke history.
 
 **Screen sharing capture is application- and mode-dependent.** Sharing an entire
 display often captures desktop overlays; sharing a single application may omit
