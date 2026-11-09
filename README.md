@@ -6,6 +6,21 @@ applications. No screen dimming, click interception, browser/webview, .NET runti
 administrator privileges or background service. Launch at Windows login is
 available as an explicit opt-in; nothing is registered by default.
 
+## Screenshots
+
+The native settings window and live desktop halo, shown over a sample presentation.
+Click any screenshot to view it at full size.
+
+| Slides: subtle yellow halo | Live demo: stronger orange halo |
+| --- | --- |
+| [![Settings and yellow cursor halo: 60 px diameter, 20% opacity](docs/screenshots/slides-yellow.png)](docs/screenshots/slides-yellow.png) | [![Settings and orange cursor halo: 120 px diameter, 50% opacity](docs/screenshots/live-demo-orange.png)](docs/screenshots/live-demo-orange.png) |
+| **Custom:** blue, 160 px, 40% opacity | **Outline only:** green ring, 140 px, 75% opacity |
+| [![Custom blue halo with adjustable size, opacity, and color](docs/screenshots/custom-blue.png)](docs/screenshots/custom-blue.png) | [![Outline-only green halo leaving the text beneath the cursor unobscured](docs/screenshots/outline-green.png)](docs/screenshots/outline-green.png) |
+
+These examples use fixed physical-pixel sizing. The outline-only option keeps
+the center transparent so text and controls remain clear beneath the cursor.
+Screen-sharing visibility still depends on the sharing application and capture mode.
+
 ## Download
 
 Published versions are available on the repository's **Releases** page. Download
