@@ -1,4 +1,4 @@
-use crate::model::{AutoHide, ClickFeedback, Settings, render};
+use crate::model::{AutoHide, ClickFeedback, PresentationPreset, Settings, render};
 use std::{
     cell::{Cell, RefCell},
     mem::{size_of, zeroed},
@@ -32,7 +32,9 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
-const ID_AUTO_HIDE: u16 = 111;
+const ID_PRESET_SLIDES: u16 = 111;
+const ID_PRESET_DEMO: u16 = 112;
+const ID_AUTO_HIDE: u16 = 113;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -193,7 +195,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(490),
+                bottom: self.scale(550),
                 ..zeroed()
             };
             check(
@@ -375,36 +377,57 @@ impl App {
             390,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_SIZE_LABEL, 24, 125, 390, 24)?;
+        self.add_control(w!("STATIC"), "Presentation presets", 0, 0, 24, 120, 160, 24)?;
+        self.add_control(
+            w!("BUTTON"),
+            "Slides",
+            WS_TABSTOP,
+            ID_PRESET_SLIDES,
+            194,
+            116,
+            100,
+            32,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
+            "Live demo",
+            WS_TABSTOP,
+            ID_PRESET_DEMO,
+            304,
+            116,
+            118,
+            32,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_SIZE_LABEL, 24, 185, 390, 24)?;
         let diameter = self.add_control(
             TRACKBAR_CLASSW,
             "",
             TBS_AUTOTICKS | WS_TABSTOP,
             ID_DIAMETER,
             24,
-            153,
+            213,
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_OPACITY_LABEL, 24, 202, 390, 24)?;
+        self.add_control(w!("STATIC"), "", 0, ID_OPACITY_LABEL, 24, 262, 390, 24)?;
         let opacity = self.add_control(
             TRACKBAR_CLASSW,
             "",
             TBS_AUTOTICKS | WS_TABSTOP,
             ID_OPACITY,
             24,
-            230,
+            290,
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 286, 90, 24)?;
+        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 346, 90, 24)?;
         self.add_control(
             w!("BUTTON"),
             "",
             WS_TABSTOP | BS_OWNERDRAW as u32,
             ID_COLOR,
             124,
-            278,
+            338,
             190,
             33,
         )?;
@@ -414,22 +437,22 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_AUTO_HIDE,
             24,
-            324,
+            384,
             400,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 370, 400, 60)?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 430, 400, 60)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            441,
+            501,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 441, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 501, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
@@ -514,6 +537,12 @@ impl App {
         self.text(ID_OPACITY_LABEL, &format!("Opacity: {}%", settings.opacity))?;
         self.text(ID_COLOR, &format!("{}   Choose...", settings.color_hex))?;
         unsafe {
+            for (id, value) in [
+                (ID_DIAMETER, settings.diameter),
+                (ID_OPACITY, settings.opacity),
+            ] {
+                SendMessageW(self.control(id), TBM_SETPOS, 1, value as isize);
+            }
             check(
                 InvalidateRect(self.control(ID_COLOR), null(), 0),
                 "Refresh color preview",
@@ -675,6 +704,15 @@ impl App {
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
+            ID_PRESET_SLIDES | ID_PRESET_DEMO => {
+                let preset = if id == ID_PRESET_SLIDES {
+                    PresentationPreset::Slides
+                } else {
+                    PresentationPreset::LiveDemo
+                };
+                self.settings.borrow_mut().apply_preset(preset);
+                self.changed()?;
+            }
             ID_HIDE => {
                 self.save();
                 unsafe {
@@ -809,6 +847,19 @@ impl App {
                 check(
                     AppendMenuW(menu, MF_SEPARATOR, 0, null()),
                     "Add tray separator",
+                )?;
+                for (id, label) in [
+                    (ID_PRESET_SLIDES, w!("Slides preset")),
+                    (ID_PRESET_DEMO, w!("Live demo preset")),
+                ] {
+                    check(
+                        AppendMenuW(menu, MF_STRING, id as usize, label),
+                        "Add tray presentation preset",
+                    )?;
+                }
+                check(
+                    AppendMenuW(menu, MF_SEPARATOR, 0, null()),
+                    "Add tray preset separator",
                 )?;
                 check(
                     AppendMenuW(menu, MF_STRING, ID_EXIT as usize, w!("Exit")),
@@ -1341,6 +1392,54 @@ fn native_checks() -> Result<(), String> {
                 "updates preserve focus",
             )?;
 
+            app.toggle()?;
+            for (id, preset) in [
+                (ID_PRESET_SLIDES, PresentationPreset::Slides),
+                (ID_PRESET_DEMO, PresentationPreset::LiveDemo),
+            ] {
+                SendMessageW(app.control(id), BM_CLICK, 0, 0);
+                let mut expected = Settings {
+                    enabled: false,
+                    ..Settings::default()
+                };
+                expected.apply_preset(preset);
+                ensure(
+                    *app.settings.borrow() == expected,
+                    "preset button changes appearance without enabling halo",
+                )?;
+                for (slider, value) in [
+                    (ID_DIAMETER, expected.diameter),
+                    (ID_OPACITY, expected.opacity),
+                ] {
+                    ensure(
+                        SendMessageW(app.control(slider), TBM_GETPOS, 0, 0) as u32 == value,
+                        "preset synchronizes manual sliders",
+                    )?;
+                }
+                app.save();
+                ensure(
+                    Settings::load(&path)? == expected,
+                    "preset values persist in existing settings file",
+                )?;
+                ensure(
+                    IsWindowVisible(app.halo.get()) == 0,
+                    "preset leaves disabled halo hidden",
+                )?;
+            }
+            app.toggle()?;
+            app.command(ID_PRESET_SLIDES)?;
+            check(
+                GetWindowRect(app.halo.get(), &mut rect),
+                "Get preset halo bounds",
+            )?;
+            ensure(
+                rect.right - rect.left == 64 && rect.bottom - rect.top == 64,
+                "preset immediately resizes enabled halo",
+            )?;
+            ensure(
+                GetForegroundWindow() == foreground,
+                "preset updates preserve focus",
+            )?;
             SendMessageW(app.control(ID_DIAMETER), TBM_SETPOS, 1, 120);
             SendMessageW(
                 app.window.get(),

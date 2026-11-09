@@ -31,6 +31,12 @@ machine or use the MSVC cross-compilation instructions below.
 ## Controls
 
 - **Highlight cursor** enables or disables the halo.
+- **Presentation presets:** select **Slides** for a subtle 60 px yellow
+  (`#FFD43B`) halo at 20% opacity, or **Live demo** for a stronger 120 px orange
+  (`#FF922B`) halo at 50% opacity. Both are also available from the tray menu
+  without opening Settings. Presets replace size, opacity, and color immediately,
+  but do not enable a disabled halo. You can still customize all three controls
+  afterward; the resulting values are saved normally, with no new settings fields.
 - **Size** adjusts the diameter from 24 to 240 physical screen pixels.
 - **Opacity** adjusts transparency from 5% to 80%.
 - **Choose...** previews the current halo color on the button, with contrasting
@@ -149,6 +155,7 @@ cargo run --locked -- --self-test
 ```
 
 Unit tests cover C# settings compatibility, validation, atomic persistence,
+presentation preset values, persistence and subsequent manual customization,
 click/release/overlapping-button timing, idle/typing fade timing and movement
 restoration, auto-hide persistence and backward-compatible defaults, alpha, color
 darkening, deformation, and premultiplied rendering across sizes and opacity values.
