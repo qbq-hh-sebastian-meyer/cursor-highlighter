@@ -1,4 +1,4 @@
-use crate::model::{ClickFeedback, Settings, render};
+use crate::model::{AutoHide, ClickFeedback, PresentationPreset, Settings, render};
 use crate::startup;
 use std::{
     cell::{Cell, RefCell},
@@ -33,8 +33,12 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
-const ID_START_MINIMIZED: u16 = 111;
-const ID_LAUNCH_AT_LOGIN: u16 = 112;
+const ID_PRESET_SLIDES: u16 = 111;
+const ID_PRESET_DEMO: u16 = 112;
+const ID_AUTO_HIDE: u16 = 113;
+const ID_SCALE_WITH_DPI: u16 = 114;
+const ID_START_MINIMIZED: u16 = 115;
+const ID_LAUNCH_AT_LOGIN: u16 = 116;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -63,6 +67,13 @@ fn check(value: i32, operation: &str) -> Result<(), String> {
         Err(os_error(operation))
     } else {
         Ok(())
+    }
+}
+
+fn halo_position(cursor: POINT, size: i32) -> POINT {
+    POINT {
+        x: cursor.x - size / 2,
+        y: cursor.y - size / 2,
     }
 }
 
@@ -102,14 +113,20 @@ struct App {
     instance: HINSTANCE,
     window: Cell<HWND>,
     halo: Cell<HWND>,
+    dpi_probe: Cell<HWND>,
     hook: Cell<HHOOK>,
+    keyboard_hook: Cell<HHOOK>,
     font: Cell<HFONT>,
     controls: RefCell<Vec<Control>>,
     settings: RefCell<Settings>,
     settings_path: PathBuf,
     click: RefCell<ClickFeedback>,
+    auto_hide: RefCell<AutoHide>,
+    cursor_position: Cell<Option<(i32, i32)>>,
     start: Instant,
     rendered: Cell<f32>,
+    rendered_diameter: Cell<u32>,
+    rendered_alpha: Cell<u8>,
     appearance_dirty: Cell<bool>,
     dirty: Cell<bool>,
     tray_added: Cell<bool>,
@@ -126,14 +143,20 @@ impl App {
             instance: unsafe { GetModuleHandleW(null()) },
             window: Cell::new(null_mut()),
             halo: Cell::new(null_mut()),
+            dpi_probe: Cell::new(null_mut()),
             hook: Cell::new(null_mut()),
+            keyboard_hook: Cell::new(null_mut()),
             font: Cell::new(null_mut()),
             controls: RefCell::new(Vec::new()),
             settings: RefCell::new(settings),
             settings_path,
             click: RefCell::new(ClickFeedback::default()),
+            auto_hide: RefCell::new(AutoHide::new(0)),
+            cursor_position: Cell::new(None),
             start: Instant::now(),
             rendered: Cell::new(-1.0),
+            rendered_diameter: Cell::new(0),
+            rendered_alpha: Cell::new(255),
             appearance_dirty: Cell::new(true),
             dirty: Cell::new(false),
             tray_added: Cell::new(false),
@@ -189,7 +212,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(520),
+                bottom: self.scale(650),
                 ..zeroed()
             };
             check(
@@ -250,6 +273,7 @@ impl App {
                 return Err(os_error("Observe mouse clicks"));
             }
             self.hook.set(hook);
+            self.set_auto_hide(self.settings.borrow().auto_hide)?;
             self.hotkey_registered.set(
                 RegisterHotKey(window, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'H' as u32) != 0,
             );
@@ -370,38 +394,79 @@ impl App {
             390,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_SIZE_LABEL, 24, 125, 390, 24)?;
+        self.add_control(w!("STATIC"), "Presentation presets", 0, 0, 24, 120, 160, 24)?;
+        self.add_control(
+            w!("BUTTON"),
+            "Slides",
+            WS_TABSTOP,
+            ID_PRESET_SLIDES,
+            194,
+            116,
+            100,
+            32,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
+            "Live demo",
+            WS_TABSTOP,
+            ID_PRESET_DEMO,
+            304,
+            116,
+            118,
+            32,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_SIZE_LABEL, 24, 185, 390, 24)?;
         let diameter = self.add_control(
             TRACKBAR_CLASSW,
             "",
             TBS_AUTOTICKS | WS_TABSTOP,
             ID_DIAMETER,
             24,
-            153,
+            213,
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_OPACITY_LABEL, 24, 202, 390, 24)?;
+        let scale_with_dpi = self.add_control(
+            w!("BUTTON"),
+            "Scale size with monitor DPI",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_SCALE_WITH_DPI,
+            24,
+            254,
+            398,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_OPACITY_LABEL, 24, 302, 390, 24)?;
         let opacity = self.add_control(
             TRACKBAR_CLASSW,
             "",
             TBS_AUTOTICKS | WS_TABSTOP,
             ID_OPACITY,
             24,
-            230,
+            330,
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 286, 90, 24)?;
+        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 386, 90, 24)?;
         self.add_control(
             w!("BUTTON"),
             "",
             WS_TABSTOP | BS_OWNERDRAW as u32,
             ID_COLOR,
             124,
-            278,
+            378,
             190,
             33,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
+            "Auto-hide when idle (1.5 s) or typing",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_AUTO_HIDE,
+            24,
+            424,
+            400,
+            25,
         )?;
         let start_minimized = self.add_control(
             w!("BUTTON"),
@@ -409,7 +474,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_START_MINIMIZED,
             24,
-            326,
+            455,
             400,
             25,
         )?;
@@ -419,22 +484,22 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_LAUNCH_AT_LOGIN,
             24,
-            357,
+            486,
             400,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 400, 400, 60)?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 530, 400, 60)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            471,
+            601,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 471, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 601, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
@@ -448,6 +513,12 @@ impl App {
                 launch_at_login,
                 BM_SETCHECK,
                 usize::from(self.launch_at_login.get()),
+                0,
+            );
+            SendMessageW(
+                scale_with_dpi,
+                BM_SETCHECK,
+                usize::from(settings.scale_with_dpi),
                 0,
             );
             for (slider, min, max, value, frequency) in [
@@ -526,11 +597,25 @@ impl App {
         let settings = self.settings.borrow().clone();
         self.text(
             ID_SIZE_LABEL,
-            &format!("Size: {} px diameter", settings.diameter),
+            &format!(
+                "Size: {} {} diameter",
+                settings.diameter,
+                if settings.scale_with_dpi {
+                    "logical px (96 DPI)"
+                } else {
+                    "physical px"
+                }
+            ),
         )?;
         self.text(ID_OPACITY_LABEL, &format!("Opacity: {}%", settings.opacity))?;
         self.text(ID_COLOR, &format!("{}   Choose...", settings.color_hex))?;
         unsafe {
+            for (id, value) in [
+                (ID_DIAMETER, settings.diameter),
+                (ID_OPACITY, settings.opacity),
+            ] {
+                SendMessageW(self.control(id), TBM_SETPOS, 1, value as isize);
+            }
             check(
                 InvalidateRect(self.control(ID_COLOR), null(), 0),
                 "Refresh color preview",
@@ -539,6 +624,18 @@ impl App {
                 self.control(ID_ENABLED),
                 BM_SETCHECK,
                 usize::from(settings.enabled),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_SCALE_WITH_DPI),
+                BM_SETCHECK,
+                usize::from(settings.scale_with_dpi),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_AUTO_HIDE),
+                BM_SETCHECK,
+                usize::from(settings.auto_hide),
                 0,
             );
         }
@@ -675,6 +772,14 @@ impl App {
                 let enabled =
                     unsafe { SendMessageW(self.control(ID_ENABLED), BM_GETCHECK, 0, 0) != 0 };
                 self.settings.borrow_mut().enabled = enabled;
+                self.auto_hide.replace(AutoHide::new(self.now()));
+                self.changed()?;
+            }
+            ID_AUTO_HIDE => {
+                let enabled =
+                    unsafe { SendMessageW(self.control(ID_AUTO_HIDE), BM_GETCHECK, 0, 0) != 0 };
+                self.set_auto_hide(enabled)?;
+                self.settings.borrow_mut().auto_hide = enabled;
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
@@ -707,6 +812,22 @@ impl App {
                     }
                 }
             }
+            ID_SCALE_WITH_DPI => {
+                let scale_with_dpi = unsafe {
+                    SendMessageW(self.control(ID_SCALE_WITH_DPI), BM_GETCHECK, 0, 0) != 0
+                };
+                self.settings.borrow_mut().scale_with_dpi = scale_with_dpi;
+                self.changed()?;
+            }
+            ID_PRESET_SLIDES | ID_PRESET_DEMO => {
+                let preset = if id == ID_PRESET_SLIDES {
+                    PresentationPreset::Slides
+                } else {
+                    PresentationPreset::LiveDemo
+                };
+                self.settings.borrow_mut().apply_preset(preset);
+                self.changed()?;
+            }
             ID_HIDE => {
                 self.save();
                 unsafe {
@@ -727,7 +848,34 @@ impl App {
             let mut settings = self.settings.borrow_mut();
             settings.enabled = !settings.enabled;
         }
+        self.auto_hide.replace(AutoHide::new(self.now()));
         self.changed()
+    }
+
+    fn set_auto_hide(&self, enabled: bool) -> Result<(), String> {
+        unsafe {
+            if enabled && self.keyboard_hook.get().is_null() {
+                let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), self.instance, 0);
+                if hook.is_null() {
+                    return Err(os_error("Observe keyboard activity for auto-hide"));
+                }
+                self.keyboard_hook.set(hook);
+            } else if !enabled && !self.keyboard_hook.get().is_null() {
+                check(
+                    UnhookWindowsHookEx(self.keyboard_hook.get()),
+                    "Remove keyboard activity observer",
+                )?;
+                self.keyboard_hook.set(null_mut());
+            }
+        }
+        self.auto_hide.replace(AutoHide::new(self.now()));
+        Ok(())
+    }
+
+    fn observe_movement(&self, x: i32, y: i32, now: u64) {
+        if self.cursor_position.replace(Some((x, y))) != Some((x, y)) {
+            self.auto_hide.borrow_mut().moved(now);
+        }
     }
 
     fn choose_color(&self) -> Result<(), String> {
@@ -815,6 +963,19 @@ impl App {
                     AppendMenuW(menu, MF_SEPARATOR, 0, null()),
                     "Add tray separator",
                 )?;
+                for (id, label) in [
+                    (ID_PRESET_SLIDES, w!("Slides preset")),
+                    (ID_PRESET_DEMO, w!("Live demo preset")),
+                ] {
+                    check(
+                        AppendMenuW(menu, MF_STRING, id as usize, label),
+                        "Add tray presentation preset",
+                    )?;
+                }
+                check(
+                    AppendMenuW(menu, MF_SEPARATOR, 0, null()),
+                    "Add tray preset separator",
+                )?;
                 check(
                     AppendMenuW(menu, MF_STRING, ID_EXIT as usize, w!("Exit")),
                     "Add tray exit item",
@@ -844,6 +1005,10 @@ impl App {
     }
 
     fn tick(&self) -> Result<(), String> {
+        self.tick_at(self.now())
+    }
+
+    fn tick_at(&self, now: u64) -> Result<(), String> {
         let settings = self.settings.borrow().clone();
         if !settings.enabled {
             self.click.borrow_mut().reset();
@@ -853,23 +1018,51 @@ impl App {
             self.appearance_dirty.set(true);
             return Ok(());
         }
-        let amount = self.click.borrow().amount(self.now());
-        if self.appearance_dirty.get() || self.rendered.get() != amount {
-            let pixels = render(&settings, amount)?;
-            self.upload(&pixels, settings.diameter as i32 + 4)?;
+        let mut cursor: POINT = unsafe { zeroed() };
+        check(
+            unsafe { GetCursorPos(&mut cursor) },
+            "Get desktop cursor position",
+        )?;
+        self.observe_movement(cursor.x, cursor.y, now);
+        let alpha = if settings.auto_hide {
+            self.auto_hide.borrow_mut().alpha(now)
+        } else {
+            255
+        };
+        if alpha == 0 {
+            unsafe {
+                ShowWindow(self.halo.get(), SW_HIDE);
+            }
+            return Ok(());
+        }
+        let dpi = if settings.scale_with_dpi {
+            self.cursor_dpi(cursor)?
+        } else {
+            96
+        };
+        let diameter = settings.pixel_diameter(dpi)?;
+        let amount = self.click.borrow().amount(now);
+        if self.appearance_dirty.get()
+            || self.rendered.get() != amount
+            || self.rendered_alpha.get() != alpha
+            || self.rendered_diameter.get() != diameter
+        {
+            let pixels = render(&settings, amount, dpi)?;
+            self.upload(&pixels, diameter as i32 + 4, cursor, alpha)?;
             self.rendered.set(amount);
+            self.rendered_alpha.set(alpha);
+            self.rendered_diameter.set(diameter);
             self.appearance_dirty.set(false);
         }
         unsafe {
-            let mut cursor = zeroed();
-            check(GetCursorPos(&mut cursor), "Get desktop cursor position")?;
-            let size = settings.diameter as i32 + 4;
+            let size = diameter as i32 + 4;
+            let position = halo_position(cursor, size);
             check(
                 SetWindowPos(
                     self.halo.get(),
                     HWND_TOPMOST,
-                    cursor.x - size / 2,
-                    cursor.y - size / 2,
+                    position.x,
+                    position.y,
                     0,
                     0,
                     SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -880,7 +1073,54 @@ impl App {
         Ok(())
     }
 
-    fn upload(&self, pixels: &[u8], size: i32) -> Result<(), String> {
+    fn cursor_dpi(&self, cursor: POINT) -> Result<u32, String> {
+        unsafe {
+            // A hidden 1px window selects the cursor's monitor even when the halo
+            // straddles a boundary. GetDpiForWindow respects Per-Monitor V2.
+            if self.dpi_probe.get().is_null() {
+                let probe = CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    HALO_CLASS,
+                    w!("Cursor Highlighter DPI probe"),
+                    WS_POPUP,
+                    cursor.x,
+                    cursor.y,
+                    1,
+                    1,
+                    null_mut(),
+                    null_mut(),
+                    self.instance,
+                    null(),
+                );
+                if probe.is_null() {
+                    return Err(os_error("Create hidden monitor DPI window"));
+                }
+                self.dpi_probe.set(probe);
+            } else if MonitorFromWindow(self.dpi_probe.get(), MONITOR_DEFAULTTONEAREST)
+                != MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+            {
+                check(
+                    SetWindowPos(
+                        self.dpi_probe.get(),
+                        null_mut(),
+                        cursor.x,
+                        cursor.y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    ),
+                    "Move hidden monitor DPI window",
+                )?;
+            }
+            let dpi = GetDpiForWindow(self.dpi_probe.get());
+            if dpi == 0 {
+                return Err(os_error("Get cursor monitor DPI"));
+            }
+            Ok(dpi)
+        }
+    }
+
+    fn upload(&self, pixels: &[u8], size: i32, cursor: POINT, alpha: u8) -> Result<(), String> {
         unsafe {
             let screen = GetDC(null_mut());
             if screen.is_null() {
@@ -915,35 +1155,30 @@ impl App {
                 Err(os_error("Select halo bitmap"))
             } else {
                 std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len());
-                let mut cursor = zeroed();
-                let result =
-                    check(GetCursorPos(&mut cursor), "Get halo upload position").and_then(|_| {
-                        let position = POINT {
-                            x: cursor.x - size / 2,
-                            y: cursor.y - size / 2,
-                        };
-                        let dimensions = SIZE { cx: size, cy: size };
-                        let blend = BLENDFUNCTION {
-                            BlendOp: AC_SRC_OVER as u8,
-                            SourceConstantAlpha: 255,
-                            AlphaFormat: AC_SRC_ALPHA as u8,
-                            BlendFlags: 0,
-                        };
-                        check(
-                            UpdateLayeredWindow(
-                                self.halo.get(),
-                                screen,
-                                &position,
-                                &dimensions,
-                                memory,
-                                &POINT { x: 0, y: 0 },
-                                0,
-                                &blend,
-                                ULW_ALPHA,
-                            ),
-                            "Upload translucent halo",
-                        )
-                    });
+                let result = {
+                    let position = halo_position(cursor, size);
+                    let dimensions = SIZE { cx: size, cy: size };
+                    let blend = BLENDFUNCTION {
+                        BlendOp: AC_SRC_OVER as u8,
+                        SourceConstantAlpha: alpha,
+                        AlphaFormat: AC_SRC_ALPHA as u8,
+                        BlendFlags: 0,
+                    };
+                    check(
+                        UpdateLayeredWindow(
+                            self.halo.get(),
+                            screen,
+                            &position,
+                            &dimensions,
+                            memory,
+                            &POINT { x: 0, y: 0 },
+                            0,
+                            &blend,
+                            ULW_ALPHA,
+                        ),
+                        "Upload translucent halo",
+                    )
+                };
                 SelectObject(memory, previous);
                 result
             };
@@ -965,6 +1200,11 @@ impl Drop for App {
             if !self.hook.get().is_null() && UnhookWindowsHookEx(self.hook.get()) == 0 {
                 eprintln!("{}", os_error("Remove mouse hook"));
             }
+            if !self.keyboard_hook.get().is_null()
+                && UnhookWindowsHookEx(self.keyboard_hook.get()) == 0
+            {
+                eprintln!("{}", os_error("Remove keyboard hook"));
+            }
             if self.hotkey_registered.get() {
                 UnregisterHotKey(self.window.get(), 1);
             }
@@ -973,6 +1213,9 @@ impl Drop for App {
             }
             if !self.halo.get().is_null() {
                 DestroyWindow(self.halo.get());
+            }
+            if !self.dpi_probe.get().is_null() {
+                DestroyWindow(self.dpi_probe.get());
             }
             if IsWindow(self.window.get()) != 0 {
                 DestroyWindow(self.window.get());
@@ -988,6 +1231,10 @@ impl Drop for App {
 
 unsafe extern "system" fn mouse_proc(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
     if code >= 0 {
+        if message as u32 == WM_MOUSEMOVE {
+            let event = unsafe { &*(data as *const MSLLHOOKSTRUCT) };
+            with_app(|app| app.observe_movement(event.pt.x, event.pt.y, app.now()));
+        }
         let action = match message as u32 {
             WM_LBUTTONDOWN => Some((1, true)),
             WM_LBUTTONUP => Some((1, false)),
@@ -1009,11 +1256,24 @@ unsafe extern "system" fn mouse_proc(code: i32, message: WPARAM, data: LPARAM) -
     unsafe { CallNextHookEx(null_mut(), code, message, data) }
 }
 
+unsafe extern "system" fn keyboard_proc(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
+    if code >= 0 && matches!(message as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        with_app(|app| {
+            let settings = app.settings.borrow();
+            if settings.enabled && settings.auto_hide {
+                // Key identities and contents are neither read nor retained.
+                app.auto_hide.borrow_mut().typed(app.now());
+            }
+        });
+    }
+    unsafe { CallNextHookEx(null_mut(), code, message, data) }
+}
+
 unsafe extern "system" fn halo_proc(window: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => MA_NOACTIVATE as isize,
         WM_NCHITTEST => HTTRANSPARENT as isize,
-        // Keep physical-pixel diameter across monitor DPI transitions.
+        // The frame timer uses the cursor's monitor, not the overlay's majority area.
         WM_DPICHANGED => 0,
         _ => unsafe { DefWindowProcW(window, message, wp, lp) },
     }
@@ -1254,6 +1514,10 @@ fn native_checks() -> Result<(), String> {
                 !app.hook.get().is_null(),
                 "native low-level mouse hook installed",
             )?;
+            ensure(
+                app.keyboard_hook.get().is_null(),
+                "default behavior does not observe keyboard activity",
+            )?;
             ensure(app.tray_added.get(), "notification icon registered")?;
             ensure(
                 IsWindowVisible(app.window.get()) == 0,
@@ -1333,6 +1597,54 @@ fn native_checks() -> Result<(), String> {
                 "updates preserve focus",
             )?;
 
+            app.toggle()?;
+            for (id, preset) in [
+                (ID_PRESET_SLIDES, PresentationPreset::Slides),
+                (ID_PRESET_DEMO, PresentationPreset::LiveDemo),
+            ] {
+                SendMessageW(app.control(id), BM_CLICK, 0, 0);
+                let mut expected = Settings {
+                    enabled: false,
+                    ..Settings::default()
+                };
+                expected.apply_preset(preset);
+                ensure(
+                    *app.settings.borrow() == expected,
+                    "preset button changes appearance without enabling halo",
+                )?;
+                for (slider, value) in [
+                    (ID_DIAMETER, expected.diameter),
+                    (ID_OPACITY, expected.opacity),
+                ] {
+                    ensure(
+                        SendMessageW(app.control(slider), TBM_GETPOS, 0, 0) as u32 == value,
+                        "preset synchronizes manual sliders",
+                    )?;
+                }
+                app.save();
+                ensure(
+                    Settings::load(&path)? == expected,
+                    "preset values persist in existing settings file",
+                )?;
+                ensure(
+                    IsWindowVisible(app.halo.get()) == 0,
+                    "preset leaves disabled halo hidden",
+                )?;
+            }
+            app.toggle()?;
+            app.command(ID_PRESET_SLIDES)?;
+            check(
+                GetWindowRect(app.halo.get(), &mut rect),
+                "Get preset halo bounds",
+            )?;
+            ensure(
+                rect.right - rect.left == 64 && rect.bottom - rect.top == 64,
+                "preset immediately resizes enabled halo",
+            )?;
+            ensure(
+                GetForegroundWindow() == foreground,
+                "preset updates preserve focus",
+            )?;
             SendMessageW(app.control(ID_DIAMETER), TBM_SETPOS, 1, 120);
             SendMessageW(
                 app.window.get(),
@@ -1351,6 +1663,39 @@ fn native_checks() -> Result<(), String> {
                 app.settings.borrow().diameter == 120 && app.settings.borrow().opacity == 50,
                 "native slider notifications",
             )?;
+            SendMessageW(app.control(ID_SCALE_WITH_DPI), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().scale_with_dpi,
+                "native DPI sizing checkbox notification",
+            )?;
+            check(GetCursorPos(&mut cursor), "Get DPI sizing test cursor")?;
+            let diameter = app
+                .settings
+                .borrow()
+                .pixel_diameter(app.cursor_dpi(cursor)?)?;
+            check(
+                GetWindowRect(app.halo.get(), &mut rect),
+                "Get DPI-scaled halo bounds",
+            )?;
+            ensure(
+                rect.right - rect.left == diameter as i32 + 4
+                    && rect.bottom - rect.top == diameter as i32 + 4,
+                "DPI-scaled halo bitmap uses the cursor monitor",
+            )?;
+            app.save();
+            ensure(
+                Settings::load(&path)?.scale_with_dpi,
+                "DPI sizing choice persists",
+            )?;
+            SendMessageW(app.control(ID_SCALE_WITH_DPI), BM_CLICK, 0, 0);
+            check(
+                GetWindowRect(app.halo.get(), &mut rect),
+                "Get physical-pixel halo bounds",
+            )?;
+            ensure(
+                !app.settings.borrow().scale_with_dpi && rect.right - rect.left == 124,
+                "unchecking DPI sizing immediately restores physical pixels",
+            )?;
             SendMessageW(app.control(ID_ENABLED), BM_CLICK, 0, 0);
             ensure(
                 !app.settings.borrow().enabled,
@@ -1358,12 +1703,82 @@ fn native_checks() -> Result<(), String> {
             )?;
             SendMessageW(app.window.get(), WM_HOTKEY, 1, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().auto_hide && !app.keyboard_hook.get().is_null(),
+                "auto-hide checkbox installs keyboard activity observer",
+            )?;
+            let now = app.now();
+            app.auto_hide.replace(AutoHide::new(now));
+            app.tick_at(now + crate::model::IDLE_HIDE_MS)?;
+            ensure(
+                app.rendered_alpha.get() == 255,
+                "idle delay preserves full opacity before fading",
+            )?;
+            app.tick_at(now + crate::model::IDLE_HIDE_MS + 90)?;
+            ensure(
+                app.rendered_alpha.get() == 128,
+                "idle fade updates layered-window alpha",
+            )?;
+            app.tick_at(now + crate::model::IDLE_HIDE_MS + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) == 0,
+                "idle fade hides the halo",
+            )?;
+            app.auto_hide.replace(AutoHide::new(app.now()));
+            keyboard_proc(HC_ACTION as i32, WM_KEYUP as usize, 0);
+            app.tick_at(app.now() + 180)?;
+            ensure(
+                app.rendered_alpha.get() == 255,
+                "key release alone does not hide the halo",
+            )?;
+            app.auto_hide.replace(AutoHide::new(app.now()));
+            keyboard_proc(HC_ACTION as i32, WM_KEYDOWN as usize, 0);
+            app.tick_at(app.now() + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) == 0,
+                "activity-only keyboard callback fades out the halo",
+            )?;
+            let now = app.now() + 180;
+            app.cursor_position
+                .set(Some((cursor.x.wrapping_add(1), cursor.y)));
+            let event = MSLLHOOKSTRUCT {
+                pt: cursor,
+                ..zeroed()
+            };
+            mouse_proc(
+                HC_ACTION as i32,
+                WM_MOUSEMOVE as usize,
+                &event as *const _ as isize,
+            );
+            app.tick_at(now + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) != 0 && app.rendered_alpha.get() == 255,
+                "mouse movement restores full opacity",
+            )?;
+            app.auto_hide.replace(AutoHide::new(app.now()));
+            keyboard_proc(HC_ACTION as i32, WM_SYSKEYDOWN as usize, 0);
+            app.tick_at(app.now() + 180)?;
+            ensure(
+                IsWindowVisible(app.halo.get()) == 0,
+                "system-key activity also hides the halo",
+            )?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
+            ensure(
+                !app.settings.borrow().auto_hide
+                    && app.keyboard_hook.get().is_null()
+                    && app.rendered_alpha.get() == 255
+                    && IsWindowVisible(app.halo.get()) != 0,
+                "disabling auto-hide removes keyboard observer and restores halo",
+            )?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
             app.command(ID_HIDE)?;
             ensure(IsWindowVisible(app.window.get()) == 0, "hide to tray")?;
             ensure(
                 Settings::load(&path)? == *app.settings.borrow(),
                 "UI settings persistence",
             )?;
+            SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
 
             let old_dpi = app.dpi.get();
             for dpi in [96, 144, 192] {
@@ -1640,5 +2055,166 @@ unsafe fn capture_pixel(x: i32, y: i32) -> Result<[u8; 3], String> {
         DeleteDC(memory);
         ReleaseDC(null_mut(), screen);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn halo_centering_handles_negative_coordinates_and_simulated_dpi_transitions() {
+        let settings = Settings {
+            diameter: 81,
+            scale_with_dpi: true,
+            ..Settings::default()
+        };
+        for (x, y, dpi, diameter) in [
+            (100, 100, 96, 81),
+            (-1920, -1080, 144, 122),
+            (-1, 0, 192, 162),
+            (0, -1, 120, 101),
+            (0, 0, 96, 81),
+        ] {
+            assert_eq!(settings.pixel_diameter(dpi).unwrap(), diameter);
+            let size = diameter as i32 + 4;
+            let position = halo_position(POINT { x, y }, size);
+            assert_eq!(position.x, x - size / 2);
+            assert_eq!(position.y, y - size / 2);
+            // Odd raster dimensions center on the same pixel, within half a pixel.
+            assert!((position.x as f64 + size as f64 / 2.0 - x as f64).abs() <= 0.5);
+            assert!((position.y as f64 + size as f64 / 2.0 - y as f64).abs() <= 0.5);
+        }
+    }
+
+    unsafe extern "system" fn collect_monitors(
+        _: HMONITOR,
+        _: HDC,
+        rect: *mut RECT,
+        data: LPARAM,
+    ) -> i32 {
+        unsafe {
+            let monitors = &mut *(data as *mut Vec<RECT>);
+            monitors.push(*rect);
+        }
+        1
+    }
+
+    #[test]
+    fn dpi_probe_tracks_attached_monitors_without_showing_or_taking_focus() {
+        let app = App::new(Settings::default(), PathBuf::new());
+        unsafe {
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(halo_proc),
+                hInstance: app.instance,
+                lpszClassName: HALO_CLASS,
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            let settings_class = WNDCLASSW {
+                lpfnWndProc: Some(settings_proc),
+                hInstance: app.instance,
+                lpszClassName: SETTINGS_CLASS,
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&settings_class), 0);
+            let foreground = GetForegroundWindow();
+            let common = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_BAR_CLASSES | ICC_STANDARD_CLASSES,
+            };
+            assert_ne!(InitCommonControlsEx(&common), 0);
+            app.window.set(CreateWindowExW(
+                WS_EX_CONTROLPARENT,
+                SETTINGS_CLASS,
+                w!("Hidden settings layout check"),
+                WS_POPUP,
+                0,
+                0,
+                450,
+                650,
+                null_mut(),
+                null_mut(),
+                app.instance,
+                null(),
+            ));
+            assert!(!app.window.get().is_null());
+            app.add_controls().unwrap();
+            app.update_labels().unwrap();
+            for dpi in [96, 144, 192] {
+                app.dpi.set(dpi);
+                app.layout().unwrap();
+                let mut previous_bottom = 0;
+                for id in [
+                    ID_PRESET_SLIDES,
+                    ID_SIZE_LABEL,
+                    ID_DIAMETER,
+                    ID_SCALE_WITH_DPI,
+                    ID_OPACITY_LABEL,
+                    ID_OPACITY,
+                    ID_COLOR,
+                    ID_AUTO_HIDE,
+                    ID_START_MINIMIZED,
+                    ID_LAUNCH_AT_LOGIN,
+                    ID_STATUS,
+                    ID_HIDE,
+                ] {
+                    let control = app.control(id);
+                    assert!(!control.is_null());
+                    assert_eq!(GetDlgCtrlID(control), id as i32);
+                    let mut bounds: RECT = zeroed();
+                    assert_ne!(GetWindowRect(control, &mut bounds), 0);
+                    assert!(bounds.top >= previous_bottom);
+                    previous_bottom = bounds.bottom;
+                    assert!(bounds.bottom <= app.scale(650));
+                }
+            }
+            app.dpi.set(96);
+            assert_eq!(IsWindowVisible(app.window.get()), 0);
+            let mut monitors = Vec::<RECT>::new();
+            assert_ne!(
+                EnumDisplayMonitors(
+                    null_mut(),
+                    null(),
+                    Some(collect_monitors),
+                    &mut monitors as *mut Vec<RECT> as isize,
+                ),
+                0
+            );
+            assert!(!monitors.is_empty());
+            for rect in monitors.iter().chain(monitors.iter().rev()) {
+                for cursor in [
+                    POINT {
+                        x: rect.left,
+                        y: rect.top,
+                    },
+                    POINT {
+                        x: rect.right - 1,
+                        y: rect.bottom - 1,
+                    },
+                ] {
+                    let dpi = app.cursor_dpi(cursor).unwrap();
+                    assert!(dpi > 0);
+                    assert_ne!(
+                        AreDpiAwarenessContextsEqual(
+                            GetWindowDpiAwarenessContext(app.dpi_probe.get()),
+                            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                        ),
+                        0
+                    );
+                    assert_eq!(
+                        MonitorFromWindow(app.dpi_probe.get(), MONITOR_DEFAULTTONEAREST),
+                        MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+                    );
+                    let mut bounds = zeroed();
+                    assert_ne!(GetWindowRect(app.dpi_probe.get(), &mut bounds), 0);
+                    assert_eq!(bounds.right - bounds.left, 1);
+                    assert_eq!(bounds.bottom - bounds.top, 1);
+                    assert_eq!(IsWindowVisible(app.dpi_probe.get()), 0);
+                    assert_eq!(GetForegroundWindow(), foreground);
+                    assert_eq!(app.dpi.get(), 96);
+                }
+            }
+        }
     }
 }
