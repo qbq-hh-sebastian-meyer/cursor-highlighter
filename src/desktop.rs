@@ -1,4 +1,6 @@
-use crate::model::{AutoHide, ClickFeedback, PresentationPreset, Settings, render};
+use crate::model::{
+    ActivationMode, AutoHide, ClickFeedback, PresentationPreset, Settings, Shortcut, render,
+};
 use crate::startup;
 use std::{
     cell::{Cell, RefCell},
@@ -33,13 +35,17 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
+const ID_CLICK_COLORS: u16 = 120;
 const ID_PRESET_SLIDES: u16 = 111;
 const ID_PRESET_DEMO: u16 = 112;
 const ID_AUTO_HIDE: u16 = 113;
 const ID_SCALE_WITH_DPI: u16 = 114;
 const ID_START_MINIMIZED: u16 = 115;
 const ID_LAUNCH_AT_LOGIN: u16 = 116;
-const ID_OUTLINE: u16 = 117;
+const ID_SHORTCUT: u16 = 117;
+const ID_APPLY_SHORTCUT: u16 = 118;
+const ID_HOLD: u16 = 119;
+const ID_OUTLINE: u16 = 121;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -71,10 +77,26 @@ fn check(value: i32, operation: &str) -> Result<(), String> {
     }
 }
 
+fn chord_held(shortcut: &Shortcut, down: impl Fn(i32) -> bool) -> bool {
+    down(shortcut.key as i32)
+        && (!shortcut.control || down(VK_CONTROL as i32))
+        && (!shortcut.alt || down(VK_MENU as i32))
+        && (!shortcut.shift || down(VK_SHIFT as i32))
+        && (!shortcut.win || down(VK_LWIN as i32) || down(VK_RWIN as i32))
+}
+
 fn halo_position(cursor: POINT, size: i32) -> POINT {
     POINT {
         x: cursor.x - size / 2,
         y: cursor.y - size / 2,
+    }
+}
+
+fn halo_alpha(settings: &Settings, auto_hide: &mut AutoHide, now: u64) -> u8 {
+    if settings.auto_hide && settings.activation_mode == ActivationMode::Toggle {
+        auto_hide.alpha(now)
+    } else {
+        255
     }
 }
 
@@ -126,12 +148,14 @@ struct App {
     cursor_position: Cell<Option<(i32, i32)>>,
     start: Instant,
     rendered: Cell<f32>,
+    rendered_colors: Cell<[f32; 2]>,
     rendered_diameter: Cell<u32>,
     rendered_alpha: Cell<u8>,
     appearance_dirty: Cell<bool>,
     dirty: Cell<bool>,
     tray_added: Cell<bool>,
-    hotkey_registered: Cell<bool>,
+    hotkey_id: Cell<i32>,
+    hold_active: Cell<bool>,
     fatal: RefCell<Option<String>>,
     dpi: Cell<u32>,
     taskbar_message: Cell<u32>,
@@ -156,12 +180,14 @@ impl App {
             cursor_position: Cell::new(None),
             start: Instant::now(),
             rendered: Cell::new(-1.0),
+            rendered_colors: Cell::new([0.0; 2]),
             rendered_diameter: Cell::new(0),
             rendered_alpha: Cell::new(255),
             appearance_dirty: Cell::new(true),
             dirty: Cell::new(false),
             tray_added: Cell::new(false),
-            hotkey_registered: Cell::new(false),
+            hotkey_id: Cell::new(0),
+            hold_active: Cell::new(false),
             fatal: RefCell::new(None),
             dpi: Cell::new(96),
             taskbar_message: Cell::new(0),
@@ -213,7 +239,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(685),
+                bottom: self.scale(830),
                 ..zeroed()
             };
             check(
@@ -274,19 +300,16 @@ impl App {
                 return Err(os_error("Observe mouse clicks"));
             }
             self.hook.set(hook);
-            self.set_auto_hide(self.settings.borrow().auto_hide)?;
-            self.hotkey_registered.set(
-                RegisterHotKey(window, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'H' as u32) != 0,
-            );
-            let shortcut_status = if self.hotkey_registered.get() {
-                "Ctrl + Alt + H toggles the halo.\r\nChanges save automatically. Closing this window exits.".into()
-            } else {
-                format!(
-                    "Shortcut unavailable ({}).\r\nUse the checkbox or tray menu to toggle.",
-                    std::io::Error::last_os_error()
-                )
-            };
-            self.text(ID_STATUS, &shortcut_status)?;
+            let auto_hide = self.settings.borrow().auto_hide;
+            self.set_auto_hide(auto_hide)?;
+            let shortcut = self.settings.borrow().shortcut.clone();
+            match self.register_shortcut(&shortcut) {
+                Ok(()) => self.shortcut_status()?,
+                Err(error) => self.text(
+                    ID_STATUS,
+                    &format!("{error}\r\nChoose another shortcut or use toggle mode."),
+                )?,
+            }
             self.update_labels()?;
             self.add_tray()?;
             let taskbar = RegisterWindowMessageW(w!("TaskbarCreated"));
@@ -471,11 +494,21 @@ impl App {
         )?;
         self.add_control(
             w!("BUTTON"),
+            "Distinct clicks: blue left / orange right",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_CLICK_COLORS,
+            24,
+            459,
+            400,
+            25,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
             "Auto-hide when idle (1.5 s) or typing",
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_AUTO_HIDE,
             24,
-            459,
+            490,
             400,
             25,
         )?;
@@ -485,7 +518,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_START_MINIMIZED,
             24,
-            490,
+            521,
             400,
             25,
         )?;
@@ -495,24 +528,72 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_LAUNCH_AT_LOGIN,
             24,
-            521,
+            552,
             400,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 565, 400, 60)?;
+        self.add_control(
+            w!("STATIC"),
+            "Shortcut (e.g. Ctrl + Alt + H)",
+            0,
+            0,
+            24,
+            590,
+            400,
+            24,
+        )?;
+        let shortcut = self.add_control(
+            w!("EDIT"),
+            "",
+            WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
+            ID_SHORTCUT,
+            24,
+            618,
+            270,
+            28,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
+            "Apply",
+            WS_TABSTOP,
+            ID_APPLY_SHORTCUT,
+            308,
+            618,
+            90,
+            28,
+        )?;
+        let hold = self.add_control(
+            w!("BUTTON"),
+            "Hold shortcut to highlight (instead of toggle)",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_HOLD,
+            24,
+            656,
+            400,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 694, 400, 80)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            636,
+            785,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 636, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 785, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
+            SendMessageW(shortcut, EM_SETLIMITTEXT, 80, 0);
+            self.text(ID_SHORTCUT, &settings.shortcut.label())?;
+            SendMessageW(
+                hold,
+                BM_SETCHECK,
+                usize::from(settings.activation_mode == ActivationMode::Hold),
+                0,
+            );
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
             SendMessageW(outline, BM_SETCHECK, usize::from(settings.outline_only), 0);
             SendMessageW(
@@ -636,6 +717,12 @@ impl App {
                 self.control(ID_ENABLED),
                 BM_SETCHECK,
                 usize::from(settings.enabled),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_CLICK_COLORS),
+                BM_SETCHECK,
+                usize::from(settings.distinct_click_colors),
                 0,
             );
             SendMessageW(
@@ -786,6 +873,18 @@ impl App {
 
     fn command(&self, id: u16) -> Result<(), String> {
         match id {
+            ID_APPLY_SHORTCUT => self.apply_shortcut()?,
+            ID_HOLD => {
+                let hold = unsafe { SendMessageW(self.control(ID_HOLD), BM_GETCHECK, 0, 0) != 0 };
+                self.settings.borrow_mut().activation_mode = if hold {
+                    ActivationMode::Hold
+                } else {
+                    ActivationMode::Toggle
+                };
+                self.hold_active.set(false);
+                self.shortcut_status()?;
+                self.changed()?;
+            }
             ID_ENABLED => {
                 let enabled =
                     unsafe { SendMessageW(self.control(ID_ENABLED), BM_GETCHECK, 0, 0) != 0 };
@@ -807,6 +906,12 @@ impl App {
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
+            ID_CLICK_COLORS => {
+                let enabled =
+                    unsafe { SendMessageW(self.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) != 0 };
+                self.settings.borrow_mut().distinct_click_colors = enabled;
+                self.changed()?;
+            }
             ID_START_MINIMIZED => {
                 self.settings.borrow_mut().start_minimized = unsafe {
                     SendMessageW(self.control(ID_START_MINIMIZED), BM_GETCHECK, 0, 0)
@@ -874,6 +979,93 @@ impl App {
         }
         self.auto_hide.replace(AutoHide::new(self.now()));
         self.changed()
+    }
+
+    fn register_shortcut(&self, shortcut: &Shortcut) -> Result<(), String> {
+        shortcut.validate()?;
+        let old_id = self.hotkey_id.get();
+        if old_id != 0 && *shortcut == self.settings.borrow().shortcut {
+            return Ok(());
+        }
+        let id = if old_id == 1 { 2 } else { 1 };
+        let modifiers = MOD_NOREPEAT
+            | if shortcut.control { MOD_CONTROL } else { 0 }
+            | if shortcut.alt { MOD_ALT } else { 0 }
+            | if shortcut.shift { MOD_SHIFT } else { 0 }
+            | if shortcut.win { MOD_WIN } else { 0 };
+        unsafe {
+            if RegisterHotKey(self.window.get(), id, modifiers, shortcut.key) == 0 {
+                let error = GetLastError();
+                return Err(format!(
+                    "{} unavailable (Windows error {error}).\r\nAlready in use or reserved.",
+                    shortcut.label(),
+                ));
+            }
+            if old_id != 0 && UnregisterHotKey(self.window.get(), old_id) == 0 {
+                let error = os_error("Release previous shortcut");
+                if UnregisterHotKey(self.window.get(), id) == 0 {
+                    return Err(format!(
+                        "{error}; {}",
+                        os_error("Release replacement shortcut")
+                    ));
+                }
+                return Err(error);
+            }
+        }
+        self.hotkey_id.set(id);
+        self.hold_active.set(false);
+        Ok(())
+    }
+
+    fn shortcut_status(&self) -> Result<(), String> {
+        let settings = self.settings.borrow().clone();
+        let action = if settings.activation_mode == ActivationMode::Hold {
+            "Hold to highlight; release any chord key to hide.\r\nHighlight cursor must be enabled."
+        } else {
+            "Press to toggle the halo."
+        };
+        let status = if self.hotkey_id.get() == 0 {
+            "Shortcut unavailable. Choose another shortcut or use toggle mode.".to_string()
+        } else {
+            format!("{}\r\n{action}", settings.shortcut.label())
+        };
+        self.text(ID_STATUS, &status)
+    }
+
+    fn apply_shortcut(&self) -> Result<(), String> {
+        let mut text = [0u16; 81];
+        let length = unsafe {
+            GetWindowTextW(
+                self.control(ID_SHORTCUT),
+                text.as_mut_ptr(),
+                text.len() as i32,
+            )
+        };
+        let candidate = Shortcut::parse(&String::from_utf16_lossy(&text[..length as usize]));
+        let result = candidate.and_then(|shortcut| {
+            self.register_shortcut(&shortcut)?;
+            self.settings.borrow_mut().shortcut = shortcut;
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.text(
+                ID_STATUS,
+                &format!("{error}\r\nPrevious shortcut/settings unchanged."),
+            )?;
+            return Ok(());
+        }
+        self.text(ID_SHORTCUT, &self.settings.borrow().shortcut.label())?;
+        self.shortcut_status()?;
+        self.changed()
+    }
+
+    fn shortcut_pressed(&self) -> Result<(), String> {
+        if self.settings.borrow().activation_mode == ActivationMode::Toggle {
+            self.toggle()
+        } else {
+            self.hold_active.set(true);
+            self.tick()
+        }
     }
 
     fn set_auto_hide(&self, enabled: bool) -> Result<(), String> {
@@ -1034,7 +1226,19 @@ impl App {
 
     fn tick_at(&self, now: u64) -> Result<(), String> {
         let settings = self.settings.borrow().clone();
-        if !settings.enabled {
+        // Inspect only this chord's keys. No keyboard hook or key history.
+        if self.hold_active.get()
+            && (!settings.enabled
+                || !chord_held(&settings.shortcut, |key| unsafe {
+                    GetAsyncKeyState(key) < 0
+                }))
+        {
+            self.hold_active.set(false);
+        }
+        if !settings
+            .activation_mode
+            .visible(settings.enabled, self.hold_active.get())
+        {
             self.click.borrow_mut().reset();
             unsafe {
                 ShowWindow(self.halo.get(), SW_HIDE);
@@ -1048,11 +1252,7 @@ impl App {
             "Get desktop cursor position",
         )?;
         self.observe_movement(cursor.x, cursor.y, now);
-        let alpha = if settings.auto_hide {
-            self.auto_hide.borrow_mut().alpha(now)
-        } else {
-            255
-        };
+        let alpha = halo_alpha(&settings, &mut self.auto_hide.borrow_mut(), now);
         if alpha == 0 {
             unsafe {
                 ShowWindow(self.halo.get(), SW_HIDE);
@@ -1066,16 +1266,23 @@ impl App {
         };
         let diameter = settings.pixel_diameter(dpi)?;
         let amount = self.click.borrow().amount(now);
+        let colors = if settings.distinct_click_colors {
+            self.click.borrow().color_amounts(now)
+        } else {
+            [0.0; 2]
+        };
         if self.appearance_dirty.get()
             || self.rendered.get() != amount
             || self.rendered_alpha.get() != alpha
             || self.rendered_diameter.get() != diameter
+            || self.rendered_colors.get() != colors
         {
-            let pixels = render(&settings, amount, dpi)?;
+            let pixels = render(&settings, amount, dpi, colors)?;
             self.upload(&pixels, diameter as i32 + 4, cursor, alpha)?;
             self.rendered.set(amount);
             self.rendered_alpha.set(alpha);
             self.rendered_diameter.set(diameter);
+            self.rendered_colors.set(colors);
             self.appearance_dirty.set(false);
         }
         unsafe {
@@ -1229,8 +1436,8 @@ impl Drop for App {
             {
                 eprintln!("{}", os_error("Remove keyboard hook"));
             }
-            if self.hotkey_registered.get() {
-                UnregisterHotKey(self.window.get(), 1);
+            if self.hotkey_id.get() != 0 {
+                UnregisterHotKey(self.window.get(), self.hotkey_id.get());
             }
             if self.tray_added.get() {
                 Shell_NotifyIconW(NIM_DELETE, &self.tray_data());
@@ -1341,7 +1548,9 @@ unsafe extern "system" fn settings_proc(
                 app.save();
                 Ok(())
             }
-            WM_HOTKEY if wp == 1 => app.toggle(),
+            WM_HOTKEY if app.hotkey_id.get() != 0 && wp == app.hotkey_id.get() as usize => {
+                app.shortcut_pressed()
+            }
             WM_CLOSE | WM_DESTROY => {
                 app.save();
                 unsafe {
@@ -1746,9 +1955,37 @@ fn native_checks() -> Result<(), String> {
                 !app.settings.borrow().outline_only,
                 "outline checkbox toggles back",
             )?;
-            SendMessageW(app.window.get(), WM_HOTKEY, 1, 0);
+            ensure(
+                app.hotkey_id.get() != 0,
+                "global shortcut is registered before testing dispatch",
+            )?;
+            SendMessageW(app.window.get(), WM_HOTKEY, app.hotkey_id.get() as usize, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
             SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
+            ensure(
+                SendMessageW(app.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) == 0,
+                "distinct click colors default off",
+            )?;
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().distinct_click_colors,
+                "distinct click colors checkbox notification",
+            )?;
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONDOWN as usize, 0);
+            app.tick()?;
+            ensure(app.rendered_colors.get() == [1.0, 0.0], "left click color")?;
+            mouse_proc(HC_ACTION as i32, WM_RBUTTONDOWN as usize, 0);
+            app.tick()?;
+            ensure(
+                app.rendered_colors.get() == [1.0; 2],
+                "overlapping click colors",
+            )?;
+            app.toggle()?;
+            app.toggle()?;
+            ensure(
+                app.rendered_colors.get() == [0.0; 2],
+                "disable clears click colors",
+            )?;
             SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
             ensure(
                 app.settings.borrow().auto_hide
@@ -1964,11 +2201,30 @@ fn native_checks() -> Result<(), String> {
             }
             let outline_ring = capture_pixel(ring_x, cursor.y)?;
             let alpha = (255.0_f32 * 0.35).round() / 255.0;
+            let mut actual_cursor: POINT = zeroed();
+            check(GetCursorPos(&mut actual_cursor), "Get outline test cursor")?;
+            let mut outline_rect: RECT = zeroed();
+            check(
+                GetWindowRect(app.halo.get(), &mut outline_rect),
+                "Get outline bounds",
+            )?;
             for c in 0..3 {
                 let expected = rgb[c] as f32 * alpha + ring_baseline[c] as f32 * (1.0 - alpha);
                 ensure(
                     (outline_ring[c] as f32 - expected).abs() <= 8.0,
-                    "outline ring preserves configured opacity",
+                    &format!(
+                        "outline ring opacity: baseline {ring_baseline:?}, actual {outline_ring:?}, channel {c} expected {expected}, cursor ({}, {}) now ({}, {}), bounds ({}, {}, {}, {}), alpha {}, visible {}",
+                        cursor.x,
+                        cursor.y,
+                        actual_cursor.x,
+                        actual_cursor.y,
+                        outline_rect.left,
+                        outline_rect.top,
+                        outline_rect.right,
+                        outline_rect.bottom,
+                        app.rendered_alpha.get(),
+                        IsWindowVisible(app.halo.get())
+                    ),
                 )?;
             }
             mouse_proc(HC_ACTION as i32, WM_LBUTTONDOWN as usize, 0);
@@ -2153,8 +2409,30 @@ unsafe fn capture_pixel(x: i32, y: i32) -> Result<[u8; 3], String> {
 }
 
 #[cfg(test)]
-mod tests {
+mod activation_tests {
     use super::*;
+
+    static NATIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn explicit_hold_overrides_auto_hide_without_changing_toggle_fades() {
+        let mut settings = Settings {
+            auto_hide: true,
+            ..Settings::default()
+        };
+        let mut hide = AutoHide::new(0);
+        hide.typed(0);
+        assert_eq!(halo_alpha(&settings, &mut hide, 180), 0);
+        settings.activation_mode = ActivationMode::Hold;
+        assert_eq!(halo_alpha(&settings, &mut hide, 180), 255);
+        assert_eq!(halo_alpha(&settings, &mut hide, 5000), 255);
+        settings.activation_mode = ActivationMode::Toggle;
+        assert_eq!(halo_alpha(&settings, &mut hide, 5000), 0);
+        hide.moved(5000);
+        assert_eq!(halo_alpha(&settings, &mut hide, 5180), 255);
+        settings.auto_hide = false;
+        assert_eq!(halo_alpha(&settings, &mut hide, 10000), 255);
+    }
 
     #[test]
     fn halo_centering_handles_negative_coordinates_and_simulated_dpi_transitions() {
@@ -2196,6 +2474,7 @@ mod tests {
 
     #[test]
     fn dpi_probe_tracks_attached_monitors_without_showing_or_taking_focus() {
+        let _lock = NATIVE_TEST_LOCK.lock().unwrap();
         let app = App::new(Settings::default(), PathBuf::new());
         unsafe {
             let class = WNDCLASSW {
@@ -2226,7 +2505,7 @@ mod tests {
                 0,
                 0,
                 450,
-                685,
+                830,
                 null_mut(),
                 null_mut(),
                 app.instance,
@@ -2248,9 +2527,12 @@ mod tests {
                     ID_OPACITY,
                     ID_OUTLINE,
                     ID_COLOR,
+                    ID_CLICK_COLORS,
                     ID_AUTO_HIDE,
                     ID_START_MINIMIZED,
                     ID_LAUNCH_AT_LOGIN,
+                    ID_SHORTCUT,
+                    ID_HOLD,
                     ID_STATUS,
                     ID_HIDE,
                 ] {
@@ -2259,9 +2541,24 @@ mod tests {
                     assert_eq!(GetDlgCtrlID(control), id as i32);
                     let mut bounds: RECT = zeroed();
                     assert_ne!(GetWindowRect(control, &mut bounds), 0);
-                    assert!(bounds.top >= previous_bottom);
+                    assert!(bounds.top >= previous_bottom, "overlapping control {id}");
                     previous_bottom = bounds.bottom;
-                    assert!(bounds.bottom <= app.scale(685));
+                    assert!(bounds.bottom <= app.scale(830));
+                }
+                let controls = app.controls.borrow();
+                for (index, control) in controls.iter().enumerate() {
+                    assert!(control.x >= 0 && control.y >= 0);
+                    assert!(control.x + control.width <= 450);
+                    assert!(control.y + control.height <= 830);
+                    for other in controls.iter().skip(index + 1) {
+                        assert!(
+                            control.x + control.width <= other.x
+                                || other.x + other.width <= control.x
+                                || control.y + control.height <= other.y
+                                || other.y + other.height <= control.y,
+                            "settings controls overlap"
+                        );
+                    }
                 }
             }
             app.dpi.set(96);
@@ -2310,6 +2607,208 @@ mod tests {
                     assert_eq!(app.dpi.get(), 96);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn hold_requires_every_configured_key_and_accepts_either_windows_key() {
+        let shortcut = Shortcut::parse("Ctrl + Alt + Shift + Win + F13").unwrap();
+        let keys = [
+            shortcut.key as i32,
+            VK_CONTROL as i32,
+            VK_MENU as i32,
+            VK_SHIFT as i32,
+            VK_LWIN as i32,
+        ];
+        assert!(chord_held(&shortcut, |key| keys.contains(&key)));
+        for released in keys {
+            assert!(!chord_held(&shortcut, |key| {
+                keys.contains(&key) && key != released
+            }));
+        }
+        assert!(chord_held(&shortcut, |key| {
+            key == VK_RWIN as i32 || (keys.contains(&key) && key != VK_LWIN as i32)
+        }));
+        let default = Shortcut::default();
+        assert!(chord_held(&default, |key| {
+            assert!([b'H' as i32, VK_CONTROL as i32, VK_MENU as i32].contains(&key));
+            true
+        }));
+    }
+
+    struct ReservedHotkey {
+        window: HWND,
+        id: i32,
+    }
+
+    impl Drop for ReservedHotkey {
+        fn drop(&mut self) {
+            assert_ne!(unsafe { UnregisterHotKey(self.window, self.id) }, 0);
+        }
+    }
+
+    struct CurrentApp;
+    impl Drop for CurrentApp {
+        fn drop(&mut self) {
+            CURRENT.with(|current| current.set(null()));
+        }
+    }
+
+    #[test]
+    fn native_shortcut_controls_conflicts_replacement_and_hold_dispatch() {
+        let _lock = NATIVE_TEST_LOCK.lock().unwrap();
+        let app = Box::new(App::new(
+            Settings {
+                enabled: false,
+                ..Settings::default()
+            },
+            std::env::temp_dir().join("CursorHighlighter.UnusedActivationTest.json"),
+        ));
+        unsafe {
+            let common = INITCOMMONCONTROLSEX {
+                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_BAR_CLASSES | ICC_STANDARD_CLASSES,
+            };
+            assert_ne!(InitCommonControlsEx(&common), 0);
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(settings_proc),
+                hInstance: app.instance,
+                lpszClassName: SETTINGS_CLASS,
+                ..zeroed()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            let window = CreateWindowExW(
+                0,
+                SETTINGS_CLASS,
+                w!("Activation test"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                450,
+                570,
+                null_mut(),
+                null_mut(),
+                app.instance,
+                null(),
+            );
+            assert!(!window.is_null());
+            app.window.set(window);
+            app.add_controls().unwrap();
+            let blocker = TestWindow(CreateWindowExW(
+                0,
+                w!("STATIC"),
+                w!("Shortcut reservation test"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                1,
+                1,
+                null_mut(),
+                null_mut(),
+                app.instance,
+                null(),
+            ));
+            assert!(!blocker.0.is_null());
+            CURRENT.with(|current| current.set(&*app));
+            let _current = CurrentApp;
+
+            app.update_labels().unwrap();
+            assert_eq!(
+                SendMessageW(app.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0),
+                0
+            );
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            assert!(app.settings.borrow().distinct_click_colors);
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            assert!(!app.settings.borrow().distinct_click_colors);
+            app.dirty.set(false);
+
+            // Use unused extended function-key chords, never the running app's default.
+            let initial = (13..=24)
+                .find_map(|number| {
+                    let shortcut =
+                        Shortcut::parse(&format!("Ctrl + Alt + Shift + F{number}")).unwrap();
+                    app.register_shortcut(&shortcut).ok().map(|()| shortcut)
+                })
+                .expect("an unused Ctrl+Alt+Shift+F13-F24 chord");
+            app.settings.borrow_mut().shortcut = initial.clone();
+            let modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
+            let conflict = (13..=24)
+                .find_map(|number| {
+                    let shortcut =
+                        Shortcut::parse(&format!("Ctrl + Alt + Shift + F{number}")).unwrap();
+                    (shortcut != initial
+                        && RegisterHotKey(blocker.0, 99, modifiers, shortcut.key) != 0)
+                        .then_some(shortcut)
+                })
+                .expect("another unused extended function-key chord");
+            let reservation = ReservedHotkey {
+                window: blocker.0,
+                id: 99,
+            };
+
+            let original_id = app.hotkey_id.get();
+            app.text(ID_SHORTCUT, &conflict.label()).unwrap();
+            SendMessageW(window, WM_COMMAND, ID_APPLY_SHORTCUT as usize, 0);
+            assert_eq!(app.settings.borrow().shortcut, initial);
+            assert_eq!(app.hotkey_id.get(), original_id);
+            assert!(!app.dirty.get());
+            let mut status = [0u16; 1024];
+            let length = GetWindowTextW(app.control(ID_STATUS), status.as_mut_ptr(), 1024);
+            let status = String::from_utf16_lossy(&status[..length as usize]);
+            assert!(status.contains("unavailable") && status.contains("unchanged"));
+            assert_eq!(RegisterHotKey(blocker.0, 100, modifiers, initial.key), 0);
+
+            app.text(ID_SHORTCUT, "Ctrl + Space").unwrap();
+            SendMessageW(window, WM_COMMAND, ID_APPLY_SHORTCUT as usize, 0);
+            assert_eq!(app.settings.borrow().shortcut, initial);
+            assert!(!app.dirty.get());
+
+            drop(reservation);
+            app.text(ID_SHORTCUT, &conflict.label()).unwrap();
+            SendMessageW(window, WM_COMMAND, ID_APPLY_SHORTCUT as usize, 0);
+            assert_eq!(app.settings.borrow().shortcut, conflict);
+            assert_ne!(app.hotkey_id.get(), original_id);
+            assert!(app.dirty.get());
+            assert_ne!(RegisterHotKey(blocker.0, 100, modifiers, initial.key), 0);
+            let _released = ReservedHotkey {
+                window: blocker.0,
+                id: 100,
+            };
+            let replacement_id = app.hotkey_id.get();
+            SendMessageW(window, WM_COMMAND, ID_APPLY_SHORTCUT as usize, 0);
+            assert_eq!(app.hotkey_id.get(), replacement_id);
+
+            SendMessageW(app.control(ID_HOLD), BM_CLICK, 0, 0);
+            assert_eq!(app.settings.borrow().activation_mode, ActivationMode::Hold);
+            app.dirty.set(false);
+            SendMessageW(window, WM_HOTKEY, replacement_id as usize, 0);
+            assert!(!app.settings.borrow().enabled);
+            assert!(!app.hold_active.get());
+            assert!(
+                !app.dirty.get(),
+                "hold dispatch must not persist temporary state"
+            );
+            SendMessageW(window, WM_HOTKEY, original_id as usize, 0);
+            assert!(
+                !app.settings.borrow().enabled,
+                "ignore messages for the old registration"
+            );
+            SendMessageW(app.control(ID_HOLD), BM_CLICK, 0, 0);
+            assert_eq!(
+                app.settings.borrow().activation_mode,
+                ActivationMode::Toggle
+            );
+            app.settings.borrow_mut().enabled = true;
+            app.dirty.set(false);
+            SendMessageW(window, WM_HOTKEY, replacement_id as usize, 0);
+            assert!(
+                !app.settings.borrow().enabled,
+                "toggle shortcut changes enabled state"
+            );
+            assert!(app.dirty.get(), "toggle changes remain persisted");
+            assert!(app.fatal.borrow().is_none());
+            assert_eq!(IsWindowVisible(window), 0);
         }
     }
 }
