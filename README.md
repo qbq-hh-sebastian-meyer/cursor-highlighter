@@ -3,7 +3,8 @@
 A small **Rust application with a native Win32 UI** for Windows 10/11. It puts a
 colored, translucent halo around the actual desktop cursor across normal desktop
 applications. No screen dimming, click interception, browser/webview, .NET runtime,
-administrator privileges, background service, or startup registration.
+administrator privileges or background service. Launch at Windows login is
+available as an explicit opt-in; nothing is registered by default.
 
 ## Download
 
@@ -31,7 +32,23 @@ machine or use the MSVC cross-compilation instructions below.
 ## Controls
 
 - **Highlight cursor** enables or disables the halo.
-- **Size** adjusts the diameter from 24 to 240 physical screen pixels.
+- **Presentation presets:** select **Slides** for a subtle 60-unit yellow
+  (`#FFD43B`) halo at 20% opacity, or **Live demo** for a stronger 120-unit orange
+  (`#FF922B`) halo at 50% opacity. Both are also available from the tray menu
+  without opening Settings. Presets replace size, opacity, and color immediately,
+  but preserve enabled, distinct click colors, auto-hide, DPI sizing, startup, shortcut, and activation
+  mode choices. Size uses the selected
+  physical or logical units. You can still customize all three controls
+  afterward; the resulting values are saved normally, with no preset field.
+- **Size** adjusts the diameter from 24 to 240 physical screen pixels by default.
+- **Scale size with monitor DPI** switches Size to logical pixels at 96 DPI.
+  The halo follows the Windows scaling of the monitor under the cursor: an
+  80-unit diameter renders as 80 pixels at 100%, 120 at 150%, and 160 at 200%.
+  This keeps its perceived size consistent with other Windows UI across laptop
+  and external displays. Uncheck it to restore fixed physical-pixel sizing.
+  The Size label identifies the current units; the saved size value does not
+  change when switching modes. Windows scaling, not measured panel dimensions,
+  determines the result.
 - **Opacity** adjusts transparency from 5% to 80%.
 - **Choose...** previews the current halo color on the button, with contrasting
   text, and opens the standard Windows color picker.
@@ -44,24 +61,68 @@ machine or use the MSVC cross-compilation instructions below.
   Holding both shows blue on the left half and orange on the right half; each
   color fades independently after release. Middle clicks keep the usual feedback.
   This mode is off by default, preserving the existing appearance.
-- **Ctrl + Alt + H** toggles the halo even while Settings is hidden. If another
-  application owns the shortcut, Settings shows a warning; the checkbox and tray
-  menu still work.
+- **Shortcut:** defaults to **Ctrl + Alt + H**, which toggles the halo even while
+  Settings is hidden. Enter a chord such as `Ctrl + Shift + F9` and click
+  **Apply** to change it. Use Ctrl, Alt, or Win (optionally Shift) with a letter,
+  digit, or F1-F24. Windows may reserve some combinations (including F12 and
+  many Win shortcuts). Invalid or unavailable shortcuts show an error in Settings
+  and leave the previous shortcut and saved settings unchanged. If the saved
+  shortcut is unavailable at startup, choose another or use the checkbox/tray
+  in toggle mode.
+- **Hold shortcut to highlight (instead of toggle):** with **Highlight cursor**
+  enabled, shows the halo only while the whole shortcut is held. Releasing any
+  required key hides it on the next frame (about 16 ms). The checkbox and tray
+  menu enable/disable highlighting; they do not latch the halo on in hold mode.
+  Switching modes clears any temporary hold. Holding the shortcut never changes
+  the saved enabled state. Toggle mode remains the default. An explicit hold
+  takes priority over auto-hide, so idle/typing detection cannot hide the halo
+  while you hold the shortcut.
+- **Auto-hide when idle (1.5 s) or typing** is optional and off by default. When
+  enabled, the halo fades out over 180 ms after 1.5 seconds without mouse
+  movement, or as soon as keyboard activity is detected. Moving the mouse fades
+  it back in over 180 ms. Typing keeps it hidden until the mouse moves, and the
+  Highlight cursor toggle still takes priority. Keyboard detection observes only
+  key-down activity: key identities and contents are not read or stored. The
+  keyboard observer is installed only while this option is enabled.
 - **Hide to tray** leaves the halo running. Double-click the notification icon or
   right-click it and select **Settings** to reopen the window.
+- **Start hidden in the tray** skips showing Settings on subsequent launches;
+  the halo and notification icon still run. Default: off.
+- **Launch at Windows login (current user)** registers this executable for your
+  Windows account, without administrator privileges. Default: off. Turn it off
+  to remove the entry. This is independent of starting hidden: enable both for
+  quiet startup at login.
 - **Exit**, the tray's **Exit**, or closing Settings stops the app. Minimizing
   only minimizes Settings.
 
-Defaults: 80 px diameter, yellow (`#FFD43B`), 35% opacity.
+Defaults: 80 physical px diameter (DPI scaling off), yellow (`#FFD43B`),
+35% opacity, auto-hide off.
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
-and PascalCase JSON fields have not changed. Corrupt/unreadable files show a
+and existing PascalCase JSON fields have not changed. The additive `Shortcut`
+and `ActivationMode` fields default to Ctrl+Alt+H and `Toggle` when absent.
+The new `AutoHide` boolean
+defaults to `false` when absent from older files. Corrupt/unreadable files show a
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
 replaced.
 The optional click-color mode is stored as the `DistinctClickColors` boolean;
 older settings files without it keep the default click feedback.
+The optional `ScaleWithDpi` JSON boolean persists the DPI sizing choice. Older
+settings files without this field retain physical-pixel sizing.
+
+Launch-at-login registration uses only the `CursorHighlighter` value in
+`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, with the full
+executable path quoted. Its checkbox reflects whether that entry exists rather
+than a potentially stale JSON preference. Registration changes only when you
+click the checkbox, never when loading or saving settings. Errors are shown and
+the checkbox is restored on failure; if the entry cannot be read, the control is
+disabled until restart. Windows may delay startup or disable it through Task
+Manager's Startup apps settings. Exit does not unregister it. Keep the executable
+in a stable location; turn the option off before moving/deleting it, then enable
+it again from the new location. Paths exceeding Windows' 260-character Run
+command limit cannot be registered.
 
 Only one app instance is allowed per Windows session. Exit any older C# build
 before starting the Rust build; they intentionally share the same instance guard.
@@ -147,24 +208,45 @@ cargo test --locked
 cargo run --locked -- --self-test
 ```
 
-Unit tests cover C# settings compatibility, validation, atomic persistence,
-click/release/overlapping-button timing, alpha, color darkening, deformation,
-independent left/right color timing, optional/simultaneous click colors, and
-premultiplied rendering across sizes and opacity values.
+Unit tests cover C# settings compatibility, shortcut parsing and validation,
+activation-mode visibility and chord release, atomic persistence,
+presentation preset values, persistence and subsequent manual customization,
+click/release/overlapping-button timing, idle/typing fade timing and movement
+restoration, auto-hide persistence and backward-compatible defaults, alpha, color
+darkening, deformation, independent left/right color timing, optional/simultaneous
+click colors, and premultiplied rendering across sizes and opacity values.
+DPI tests cover
+opt-in defaults, persistence in both modes, fractional-scale rounding, simulated
+monitor transitions, larger scaled bitmaps, and negative-coordinate centering.
+A hidden-window test checks DPI lookup and monitor selection on attached displays
+without moving the real cursor, showing an overlay, taking focus, installing
+hooks, or changing user settings. Simulated transitions and hidden-window checks
+do not establish physical mixed-DPI cursor behavior.
+Startup tests cover default-off JSON compatibility and quoted executable commands
+(including spaces, Unicode, UNC paths, and invalid/overlong input). Tests never
+register the app for login or change real user settings.
+Hidden native windows and unused extended-function-key chords also check
+shortcut conflicts, replacement, settings controls, and hold dispatch,
+without injecting keyboard input or touching the running app or user settings.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
 no-activation behavior, cursor centering, topmost placement, native controls,
-hotkey dispatch, settings persistence, DPI-scaled control layout, and actual
-desktop compositing for both the normal and pressed halo. It uses an isolated
+hotkey dispatch, optional keyboard observer lifecycle, idle/typing hiding and
+mouse-movement restoration, settings persistence, DPI-scaled control layout,
+live DPI sizing checkbox changes, and
+actual desktop compositing for both the normal and pressed halo. It uses an isolated
 temporary settings file, never overwriting your settings. Close the running app
 first, keep the desktop unlocked, and leave the cursor still over a static area
 while running this check. It calls the mouse-observer callback directly to check
-click feedback; it does not inject real clicks into your desktop.
+click feedback and calls the keyboard observer with activity-only messages; it
+does not inject real clicks or keystrokes into your desktop.
 
 Before a presentation, also verify interactively:
 
-1. Move the pointer across all monitors, including mixed-DPI displays.
+1. Move the pointer across all monitors, including mixed-DPI displays. Check both
+   sizing modes, monitor boundaries, and displays left of or above the primary
+   display; repeat while holding a mouse button and after changing display scale.
 2. Click, drag, scroll, and type in the applications you plan to present.
 3. Check the audience's view or a test recording in your sharing application.
 
@@ -173,15 +255,31 @@ Before a presentation, also verify interactively:
 `windows-sys` provides direct Win32 bindings; there is no GUI framework.
 `src\desktop.rs` owns the native windows, controls, tray, timers, hook, color
 dialog, shortcut, and GDI resources on one UI thread. `src\model.rs` contains
-settings, click timing, and anti-aliased premultiplied BGRA rendering.
+settings, click/auto-hide timing, and anti-aliased premultiplied BGRA rendering.
+`src\startup.rs` owns the current-user launch-at-login registry entry.
 
 The halo is a per-pixel-alpha, click-through, non-activating layered topmost
 window. A 16 ms timer follows desktop cursor coordinates; only appearance changes
 regenerate its bitmap. The low-level mouse hook observes button transitions and
-always forwards input without rendering inside the callback. Per-monitor V2 DPI
-awareness keeps halo dimensions in physical pixels and scales Settings on monitor
-changes. Negative desktop coordinates are supported; the halo clips naturally at
-display edges.
+movement; the optional low-level keyboard hook observes activity without reading
+key data. Both always forward input without rendering inside the callback.
+Auto-hide fades use the layered window's constant alpha, preserving the selected
+color, opacity, and click feedback. Per-monitor V2 DPI
+awareness scales Settings on monitor changes. Halo dimensions remain fixed in
+physical pixels by default. When DPI sizing is enabled, a hidden, non-activating
+1-pixel window selects the cursor's monitor and `GetDpiForWindow` reads its current
+effective DPI. This avoids selecting a monitor based on the larger halo's area
+when it straddles a boundary. The frame timer regenerates the bitmap when the
+scaled diameter changes, including while click feedback is active. DPI lookup
+and positioning use the same cursor sample. Negative desktop coordinates are
+supported; the halo clips naturally at display edges.
+
+Shortcuts use Windows global hotkey registration with repeat suppression.
+Replacement shortcuts are registered before the old registration is released,
+so a conflict does not disable a working shortcut. Hold mode uses the existing
+frame timer to inspect only the configured chord's current key states after a
+hotkey activation. Hold mode adds no keyboard hook and records no keystroke
+history; the separate auto-hide option still controls its activity-only observer.
 
 **Screen sharing capture is application- and mode-dependent.** Sharing an entire
 display often captures desktop overlays; sharing a single application may omit
