@@ -8,6 +8,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub outline_only: bool,
 }
 
 impl Default for Settings {
@@ -17,6 +18,7 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            outline_only: false,
         }
     }
 }
@@ -148,7 +150,17 @@ pub fn render(settings: &Settings, feedback: f32) -> Result<Vec<u8>, String> {
                 for sx in 0..4 {
                     let dx = (x as f32 + (sx as f32 + 0.5) / 4.0 - center) / rx;
                     let dy = (y as f32 + (sy as f32 + 0.5) / 4.0 - center) / ry;
-                    covered += u32::from(dx * dx + dy * dy <= 1.0);
+                    let outer = dx * dx + dy * dy <= 1.0;
+                    let inner = if settings.outline_only {
+                        let inner_rx = rx - 5.0;
+                        let inner_ry = ry - 5.0;
+                        let inner_dx = (x as f32 + (sx as f32 + 0.5) / 4.0 - center) / inner_rx;
+                        let inner_dy = (y as f32 + (sy as f32 + 0.5) / 4.0 - center) / inner_ry;
+                        inner_dx * inner_dx + inner_dy * inner_dy <= 1.0
+                    } else {
+                        false
+                    };
+                    covered += u32::from(outer && !inner);
                 }
             }
             let alpha = (255.0 * settings.opacity as f32 / 100.0 * covered as f32 / 16.0).round();
@@ -176,6 +188,7 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.outline_only);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
@@ -233,6 +246,7 @@ mod tests {
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         settings.opacity = 65;
+        settings.outline_only = true;
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         assert!(!path.with_extension("json.tmp").exists());
@@ -298,6 +312,53 @@ mod tests {
                 let near_top = ((2 + (diameter as f32 * 0.04) as usize) * size + size / 2) * 4 + 3;
                 assert!(normal[near_top] > 0);
                 assert_eq!(pressed[near_top], 0);
+            }
+        }
+    }
+
+    #[test]
+    fn outline_render_keeps_interior_clear_and_deforms_with_click_feedback() {
+        for diameter in [24, 80, 240] {
+            for opacity in [5, 35, 80] {
+                let settings = Settings {
+                    diameter,
+                    opacity,
+                    outline_only: true,
+                    ..Settings::default()
+                };
+                let normal = render(&settings, 0.0).unwrap();
+                let pressed = render(&settings, 1.0).unwrap();
+                let rgb = settings.rgb().unwrap();
+                let size = diameter as usize + 4;
+                let center = size / 2;
+                let center_pixel = (center * size + center) * 4;
+                let ring_x = center + (diameter as f32 / 2.0 - 2.5).round() as usize;
+                let ring_pixel = (center * size + ring_x) * 4;
+                let pressed_ring_x = center + (diameter as f32 * 0.96 / 2.0 - 2.5).round() as usize;
+                let pressed_ring_pixel = (center * size + pressed_ring_x) * 4;
+                let inner_x = center + (diameter as f32 * 0.2).round() as usize;
+                let inner_pixel = (center * size + inner_x) * 4;
+
+                assert_eq!(normal[center_pixel + 3], 0);
+                assert_eq!(pressed[center_pixel + 3], 0);
+                assert!(normal[ring_pixel + 3] > 0);
+                assert!(pressed[pressed_ring_pixel + 3] > 0);
+                assert_eq!(normal[inner_pixel + 3], 0);
+                assert_eq!(pressed[inner_pixel + 3], 0);
+                for c in 0..3 {
+                    let expected =
+                        (rgb[2 - c] as f32 * 0.65 * pressed[pressed_ring_pixel + 3] as f32 / 255.0)
+                            .round();
+                    assert!((pressed[pressed_ring_pixel + c] as f32 - expected).abs() <= 1.0);
+                }
+                for pixel in normal
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .chain(pressed.as_chunks::<4>().0.iter())
+                {
+                    assert!(pixel[..3].iter().all(|&channel| channel <= pixel[3]));
+                }
             }
         }
     }

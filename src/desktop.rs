@@ -32,6 +32,7 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
+const ID_OUTLINE: u16 = 111;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -184,7 +185,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(450),
+                bottom: self.scale(490),
                 ..zeroed()
             };
             check(
@@ -387,32 +388,43 @@ impl App {
             398,
             35,
         )?;
-        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 286, 90, 24)?;
+        let outline = self.add_control(
+            w!("BUTTON"),
+            "Outline only (keep text readable)",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_OUTLINE,
+            24,
+            274,
+            390,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "Halo color", 0, 0, 24, 314, 90, 24)?;
         self.add_control(
             w!("BUTTON"),
             "",
             WS_TABSTOP | BS_OWNERDRAW as u32,
             ID_COLOR,
             124,
-            278,
+            306,
             190,
             33,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 330, 400, 60)?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 355, 400, 60)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            401,
+            431,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 401, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 431, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
+            SendMessageW(outline, BM_SETCHECK, usize::from(settings.outline_only), 0);
             for (slider, min, max, value, frequency) in [
                 (diameter, 24, 240, settings.diameter, 24),
                 (opacity, 5, 80, settings.opacity, 5),
@@ -638,6 +650,12 @@ impl App {
                 let enabled =
                     unsafe { SendMessageW(self.control(ID_ENABLED), BM_GETCHECK, 0, 0) != 0 };
                 self.settings.borrow_mut().enabled = enabled;
+                self.changed()?;
+            }
+            ID_OUTLINE => {
+                let outline_only =
+                    unsafe { SendMessageW(self.control(ID_OUTLINE), BM_GETCHECK, 0, 0) != 0 };
+                self.settings.borrow_mut().outline_only = outline_only;
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
@@ -1254,6 +1272,16 @@ fn native_checks() -> Result<(), String> {
                 !app.settings.borrow().enabled,
                 "native checkbox notification",
             )?;
+            SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().outline_only,
+                "outline checkbox notification",
+            )?;
+            SendMessageW(app.control(ID_OUTLINE), BM_CLICK, 0, 0);
+            ensure(
+                !app.settings.borrow().outline_only,
+                "outline checkbox toggles back",
+            )?;
             SendMessageW(app.window.get(), WM_HOTKEY, 1, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
             app.command(ID_HIDE)?;
@@ -1375,6 +1403,51 @@ fn native_checks() -> Result<(), String> {
                 app.rendered.get() == 0.0,
                 "click release restores appearance",
             )?;
+            let ring_x = cursor.x
+                + if cursor.x + 36 < monitor_info.rcMonitor.right {
+                    36
+                } else {
+                    -36
+                };
+            app.settings.borrow_mut().enabled = false;
+            app.tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let ring_baseline = capture_pixel(ring_x, cursor.y)?;
+            app.settings.borrow_mut().enabled = true;
+            app.settings.borrow_mut().outline_only = true;
+            app.tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let outline_center = capture_pixel(x, y)?;
+            for c in 0..3 {
+                ensure(
+                    (outline_center[c] as i16 - baseline[c] as i16).abs() <= 8,
+                    "outline keeps the cursor interior clear",
+                )?;
+            }
+            let outline_ring = capture_pixel(ring_x, cursor.y)?;
+            let alpha = (255.0_f32 * 0.35).round() / 255.0;
+            for c in 0..3 {
+                let expected = rgb[c] as f32 * alpha + ring_baseline[c] as f32 * (1.0 - alpha);
+                ensure(
+                    (outline_ring[c] as f32 - expected).abs() <= 8.0,
+                    "outline ring preserves configured opacity",
+                )?;
+            }
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONDOWN as usize, 0);
+            app.tick()?;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let outline_pressed = capture_pixel(ring_x, cursor.y)?;
+            for c in 0..3 {
+                let expected = (rgb[c] as f32 * 0.65).round() * alpha
+                    + ring_baseline[c] as f32 * (1.0 - alpha);
+                ensure(
+                    (outline_pressed[c] as f32 - expected).abs() <= 8.0,
+                    "outline click feedback darkens ring without changing opacity",
+                )?;
+            }
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONUP as usize, 0);
+            std::thread::sleep(std::time::Duration::from_millis(310));
+            app.tick()?;
             check(
                 PostMessageW(app.window.get(), WM_CLOSE, 0, 0),
                 "Request native window close",

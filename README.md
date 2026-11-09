@@ -33,6 +33,8 @@ machine or use the MSVC cross-compilation instructions below.
 - **Highlight cursor** enables or disables the halo.
 - **Size** adjusts the diameter from 24 to 240 physical screen pixels.
 - **Opacity** adjusts transparency from 5% to 80%.
+- **Outline only** draws a 5 px outline instead of filling the halo, keeping
+  content under the cursor readable. It is off by default.
 - **Choose...** previews the current halo color on the button, with contrasting
   text, and opens the standard Windows color picker.
 - **Click feedback:** left, right, and middle presses slightly squash the halo and
@@ -47,7 +49,7 @@ machine or use the MSVC cross-compilation instructions below.
 - **Exit**, the tray's **Exit**, or closing Settings stops the app. Minimizing
   only minimizes Settings.
 
-Defaults: 80 px diameter, yellow (`#FFD43B`), 35% opacity.
+Defaults: 80 px diameter, yellow (`#FFD43B`), 35% opacity, filled halo.
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
@@ -141,18 +143,20 @@ cargo run --locked -- --self-test
 ```
 
 Unit tests cover C# settings compatibility, validation, atomic persistence,
-click/release/overlapping-button timing, alpha, color darkening, deformation,
-and premultiplied rendering across sizes and opacity values.
+click/release/overlapping-button timing, filled and outline alpha, color
+darkening, deformation, and premultiplied rendering across sizes and opacity
+values.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
 no-activation behavior, cursor centering, topmost placement, native controls,
 hotkey dispatch, settings persistence, DPI-scaled control layout, and actual
-desktop compositing for both the normal and pressed halo. It uses an isolated
-temporary settings file, never overwriting your settings. Close the running app
-first, keep the desktop unlocked, and leave the cursor still over a static area
-while running this check. It calls the mouse-observer callback directly to check
-click feedback; it does not inject real clicks into your desktop.
+desktop compositing for both halo styles in normal and pressed states. It uses
+an isolated temporary settings file, never overwriting your settings. Close the
+running app first, keep the desktop unlocked, and leave the cursor still over a
+static area while running this check. It calls the mouse-observer callback
+directly to check click feedback; it does not inject real clicks into your
+desktop.
 
 Before a presentation, also verify interactively:
 
@@ -165,7 +169,9 @@ Before a presentation, also verify interactively:
 `windows-sys` provides direct Win32 bindings; there is no GUI framework.
 `src\desktop.rs` owns the native windows, controls, tray, timers, hook, color
 dialog, shortcut, and GDI resources on one UI thread. `src\model.rs` contains
-settings, click timing, and anti-aliased premultiplied BGRA rendering.
+settings, click timing, and anti-aliased premultiplied BGRA rendering. The
+optional outline is formed by subtracting an inset ellipse from the filled
+shape, preserving the existing alpha, color, and click-feedback behavior.
 
 The halo is a per-pixel-alpha, click-through, non-activating layered topmost
 window. A 16 ms timer follows desktop cursor coordinates; only appearance changes
