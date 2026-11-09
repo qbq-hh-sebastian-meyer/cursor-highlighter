@@ -36,7 +36,7 @@ machine or use the MSVC cross-compilation instructions below.
   (`#FFD43B`) halo at 20% opacity, or **Live demo** for a stronger 120-unit orange
   (`#FF922B`) halo at 50% opacity. Both are also available from the tray menu
   without opening Settings. Presets replace size, opacity, and color immediately,
-  but preserve enabled, auto-hide, DPI sizing, startup, shortcut, and activation
+  but preserve enabled, distinct click colors, auto-hide, DPI sizing, startup, shortcut, and activation
   mode choices. Size uses the selected
   physical or logical units. You can still customize all three controls
   afterward; the resulting values are saved normally, with no preset field.
@@ -56,6 +56,11 @@ machine or use the MSVC cross-compilation instructions below.
   darken the selected color. It stays pressed during a drag and smoothly returns
   to normal after release. Even quick clicks remain visible briefly. Input is
   always forwarded to the underlying application.
+- **Distinct clicks: blue left / orange right** optionally tints left clicks blue
+  (`#3388FF`) and right clicks orange (`#FF6633`), retaining squash/darken feedback.
+  Holding both shows blue on the left half and orange on the right half; each
+  color fades independently after release. Middle clicks keep the usual feedback.
+  This mode is off by default, preserving the existing appearance.
 - **Shortcut:** defaults to **Ctrl + Alt + H**, which toggles the halo even while
   Settings is hidden. Enter a chord such as `Ctrl + Shift + F9` and click
   **Apply** to change it. Use Ctrl, Alt, or Win (optionally Shift) with a letter,
@@ -102,6 +107,8 @@ defaults to `false` when absent from older files. Corrupt/unreadable files show 
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
 replaced.
+The optional click-color mode is stored as the `DistinctClickColors` boolean;
+older settings files without it keep the default click feedback.
 The optional `ScaleWithDpi` JSON boolean persists the DPI sizing choice. Older
 settings files without this field retain physical-pixel sizing.
 
@@ -206,7 +213,8 @@ activation-mode visibility and chord release, atomic persistence,
 presentation preset values, persistence and subsequent manual customization,
 click/release/overlapping-button timing, idle/typing fade timing and movement
 restoration, auto-hide persistence and backward-compatible defaults, alpha, color
-darkening, deformation, and premultiplied rendering across sizes and opacity values.
+darkening, deformation, independent left/right color timing, optional/simultaneous
+click colors, and premultiplied rendering across sizes and opacity values.
 DPI tests cover
 opt-in defaults, persistence in both modes, fractional-scale rounding, simulated
 monitor transitions, larger scaled bitmaps, and negative-coordinate centering.

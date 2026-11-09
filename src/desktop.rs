@@ -35,6 +35,7 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
+const ID_CLICK_COLORS: u16 = 120;
 const ID_PRESET_SLIDES: u16 = 111;
 const ID_PRESET_DEMO: u16 = 112;
 const ID_AUTO_HIDE: u16 = 113;
@@ -146,6 +147,7 @@ struct App {
     cursor_position: Cell<Option<(i32, i32)>>,
     start: Instant,
     rendered: Cell<f32>,
+    rendered_colors: Cell<[f32; 2]>,
     rendered_diameter: Cell<u32>,
     rendered_alpha: Cell<u8>,
     appearance_dirty: Cell<bool>,
@@ -177,6 +179,7 @@ impl App {
             cursor_position: Cell::new(None),
             start: Instant::now(),
             rendered: Cell::new(-1.0),
+            rendered_colors: Cell::new([0.0; 2]),
             rendered_diameter: Cell::new(0),
             rendered_alpha: Cell::new(255),
             appearance_dirty: Cell::new(true),
@@ -235,7 +238,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(760),
+                bottom: self.scale(795),
                 ..zeroed()
             };
             check(
@@ -480,11 +483,21 @@ impl App {
         )?;
         self.add_control(
             w!("BUTTON"),
+            "Distinct clicks: blue left / orange right",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_CLICK_COLORS,
+            24,
+            424,
+            400,
+            25,
+        )?;
+        self.add_control(
+            w!("BUTTON"),
             "Auto-hide when idle (1.5 s) or typing",
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_AUTO_HIDE,
             24,
-            424,
+            459,
             400,
             25,
         )?;
@@ -494,7 +507,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_START_MINIMIZED,
             24,
-            455,
+            490,
             400,
             25,
         )?;
@@ -504,7 +517,7 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_LAUNCH_AT_LOGIN,
             24,
-            486,
+            521,
             400,
             25,
         )?;
@@ -514,7 +527,7 @@ impl App {
             0,
             0,
             24,
-            520,
+            555,
             400,
             24,
         )?;
@@ -524,7 +537,7 @@ impl App {
             WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
             ID_SHORTCUT,
             24,
-            548,
+            583,
             270,
             28,
         )?;
@@ -534,7 +547,7 @@ impl App {
             WS_TABSTOP,
             ID_APPLY_SHORTCUT,
             308,
-            548,
+            583,
             90,
             28,
         )?;
@@ -544,22 +557,22 @@ impl App {
             BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
             ID_HOLD,
             24,
-            586,
+            621,
             400,
             25,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 624, 400, 80)?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 659, 400, 80)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            715,
+            750,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 715, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 750, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(shortcut, EM_SETLIMITTEXT, 80, 0);
@@ -692,6 +705,12 @@ impl App {
                 self.control(ID_ENABLED),
                 BM_SETCHECK,
                 usize::from(settings.enabled),
+                0,
+            );
+            SendMessageW(
+                self.control(ID_CLICK_COLORS),
+                BM_SETCHECK,
+                usize::from(settings.distinct_click_colors),
                 0,
             );
             SendMessageW(
@@ -863,6 +882,12 @@ impl App {
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
+            ID_CLICK_COLORS => {
+                let enabled =
+                    unsafe { SendMessageW(self.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) != 0 };
+                self.settings.borrow_mut().distinct_click_colors = enabled;
+                self.changed()?;
+            }
             ID_START_MINIMIZED => {
                 self.settings.borrow_mut().start_minimized = unsafe {
                     SendMessageW(self.control(ID_START_MINIMIZED), BM_GETCHECK, 0, 0)
@@ -1217,16 +1242,23 @@ impl App {
         };
         let diameter = settings.pixel_diameter(dpi)?;
         let amount = self.click.borrow().amount(now);
+        let colors = if settings.distinct_click_colors {
+            self.click.borrow().color_amounts(now)
+        } else {
+            [0.0; 2]
+        };
         if self.appearance_dirty.get()
             || self.rendered.get() != amount
             || self.rendered_alpha.get() != alpha
             || self.rendered_diameter.get() != diameter
+            || self.rendered_colors.get() != colors
         {
-            let pixels = render(&settings, amount, dpi)?;
+            let pixels = render(&settings, amount, dpi, colors)?;
             self.upload(&pixels, diameter as i32 + 4, cursor, alpha)?;
             self.rendered.set(amount);
             self.rendered_alpha.set(alpha);
             self.rendered_diameter.set(diameter);
+            self.rendered_colors.set(colors);
             self.appearance_dirty.set(false);
         }
         unsafe {
@@ -1884,6 +1916,30 @@ fn native_checks() -> Result<(), String> {
             )?;
             SendMessageW(app.window.get(), WM_HOTKEY, app.hotkey_id.get() as usize, 0);
             ensure(app.settings.borrow().enabled, "global shortcut dispatch")?;
+            ensure(
+                SendMessageW(app.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0) == 0,
+                "distinct click colors default off",
+            )?;
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().distinct_click_colors,
+                "distinct click colors checkbox notification",
+            )?;
+            mouse_proc(HC_ACTION as i32, WM_LBUTTONDOWN as usize, 0);
+            app.tick()?;
+            ensure(app.rendered_colors.get() == [1.0, 0.0], "left click color")?;
+            mouse_proc(HC_ACTION as i32, WM_RBUTTONDOWN as usize, 0);
+            app.tick()?;
+            ensure(
+                app.rendered_colors.get() == [1.0; 2],
+                "overlapping click colors",
+            )?;
+            app.toggle()?;
+            app.toggle()?;
+            ensure(
+                app.rendered_colors.get() == [0.0; 2],
+                "disable clears click colors",
+            )?;
             SendMessageW(app.control(ID_AUTO_HIDE), BM_CLICK, 0, 0);
             ensure(
                 app.settings.borrow().auto_hide && !app.keyboard_hook.get().is_null(),
@@ -2336,7 +2392,7 @@ mod activation_tests {
                 0,
                 0,
                 450,
-                760,
+                795,
                 null_mut(),
                 null_mut(),
                 app.instance,
@@ -2357,6 +2413,7 @@ mod activation_tests {
                     ID_OPACITY_LABEL,
                     ID_OPACITY,
                     ID_COLOR,
+                    ID_CLICK_COLORS,
                     ID_AUTO_HIDE,
                     ID_START_MINIMIZED,
                     ID_LAUNCH_AT_LOGIN,
@@ -2372,13 +2429,13 @@ mod activation_tests {
                     assert_ne!(GetWindowRect(control, &mut bounds), 0);
                     assert!(bounds.top >= previous_bottom, "overlapping control {id}");
                     previous_bottom = bounds.bottom;
-                    assert!(bounds.bottom <= app.scale(760));
+                    assert!(bounds.bottom <= app.scale(795));
                 }
                 let controls = app.controls.borrow();
                 for (index, control) in controls.iter().enumerate() {
                     assert!(control.x >= 0 && control.y >= 0);
                     assert!(control.x + control.width <= 450);
-                    assert!(control.y + control.height <= 760);
+                    assert!(control.y + control.height <= 795);
                     for other in controls.iter().skip(index + 1) {
                         assert!(
                             control.x + control.width <= other.x
@@ -2540,6 +2597,17 @@ mod activation_tests {
             assert!(!blocker.0.is_null());
             CURRENT.with(|current| current.set(&*app));
             let _current = CurrentApp;
+
+            app.update_labels().unwrap();
+            assert_eq!(
+                SendMessageW(app.control(ID_CLICK_COLORS), BM_GETCHECK, 0, 0),
+                0
+            );
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            assert!(app.settings.borrow().distinct_click_colors);
+            SendMessageW(app.control(ID_CLICK_COLORS), BM_CLICK, 0, 0);
+            assert!(!app.settings.borrow().distinct_click_colors);
+            app.dirty.set(false);
 
             // Use unused extended function-key chords, never the running app's default.
             let initial = (13..=24)
