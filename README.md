@@ -36,7 +36,8 @@ machine or use the MSVC cross-compilation instructions below.
   (`#FFD43B`) halo at 20% opacity, or **Live demo** for a stronger 120-unit orange
   (`#FF922B`) halo at 50% opacity. Both are also available from the tray menu
   without opening Settings. Presets replace size, opacity, and color immediately,
-  but preserve enabled, auto-hide, and DPI sizing choices. Size uses the selected
+  but preserve enabled, auto-hide, DPI sizing, startup, shortcut, and activation
+  mode choices. Size uses the selected
   physical or logical units. You can still customize all three controls
   afterward; the resulting values are saved normally, with no preset field.
 - **Size** adjusts the diameter from 24 to 240 physical screen pixels by default.
@@ -55,6 +56,22 @@ machine or use the MSVC cross-compilation instructions below.
   darken the selected color. It stays pressed during a drag and smoothly returns
   to normal after release. Even quick clicks remain visible briefly. Input is
   always forwarded to the underlying application.
+- **Shortcut:** defaults to **Ctrl + Alt + H**, which toggles the halo even while
+  Settings is hidden. Enter a chord such as `Ctrl + Shift + F9` and click
+  **Apply** to change it. Use Ctrl, Alt, or Win (optionally Shift) with a letter,
+  digit, or F1-F24. Windows may reserve some combinations (including F12 and
+  many Win shortcuts). Invalid or unavailable shortcuts show an error in Settings
+  and leave the previous shortcut and saved settings unchanged. If the saved
+  shortcut is unavailable at startup, choose another or use the checkbox/tray
+  in toggle mode.
+- **Hold shortcut to highlight (instead of toggle):** with **Highlight cursor**
+  enabled, shows the halo only while the whole shortcut is held. Releasing any
+  required key hides it on the next frame (about 16 ms). The checkbox and tray
+  menu enable/disable highlighting; they do not latch the halo on in hold mode.
+  Switching modes clears any temporary hold. Holding the shortcut never changes
+  the saved enabled state. Toggle mode remains the default. An explicit hold
+  takes priority over auto-hide, so idle/typing detection cannot hide the halo
+  while you hold the shortcut.
 - **Auto-hide when idle (1.5 s) or typing** is optional and off by default. When
   enabled, the halo fades out over 180 ms after 1.5 seconds without mouse
   movement, or as soon as keyboard activity is detected. Moving the mouse fades
@@ -62,9 +79,6 @@ machine or use the MSVC cross-compilation instructions below.
   Highlight cursor toggle still takes priority. Keyboard detection observes only
   key-down activity: key identities and contents are not read or stored. The
   keyboard observer is installed only while this option is enabled.
-- **Ctrl + Alt + H** toggles the halo even while Settings is hidden. If another
-  application owns the shortcut, Settings shows a warning; the checkbox and tray
-  menu still work.
 - **Hide to tray** leaves the halo running. Double-click the notification icon or
   right-click it and select **Settings** to reopen the window.
 - **Start hidden in the tray** skips showing Settings on subsequent launches;
@@ -81,7 +95,9 @@ Defaults: 80 physical px diameter (DPI scaling off), yellow (`#FFD43B`),
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
-and existing PascalCase JSON fields have not changed. The new `AutoHide` boolean
+and existing PascalCase JSON fields have not changed. The additive `Shortcut`
+and `ActivationMode` fields default to Ctrl+Alt+H and `Toggle` when absent.
+The new `AutoHide` boolean
 defaults to `false` when absent from older files. Corrupt/unreadable files show a
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
@@ -185,7 +201,8 @@ cargo test --locked
 cargo run --locked -- --self-test
 ```
 
-Unit tests cover C# settings compatibility, validation, atomic persistence,
+Unit tests cover C# settings compatibility, shortcut parsing and validation,
+activation-mode visibility and chord release, atomic persistence,
 presentation preset values, persistence and subsequent manual customization,
 click/release/overlapping-button timing, idle/typing fade timing and movement
 restoration, auto-hide persistence and backward-compatible defaults, alpha, color
@@ -200,6 +217,9 @@ do not establish physical mixed-DPI cursor behavior.
 Startup tests cover default-off JSON compatibility and quoted executable commands
 (including spaces, Unicode, UNC paths, and invalid/overlong input). Tests never
 register the app for login or change real user settings.
+Hidden native windows and unused extended-function-key chords also check
+shortcut conflicts, replacement, settings controls, and hold dispatch,
+without injecting keyboard input or touching the running app or user settings.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
@@ -245,6 +265,13 @@ when it straddles a boundary. The frame timer regenerates the bitmap when the
 scaled diameter changes, including while click feedback is active. DPI lookup
 and positioning use the same cursor sample. Negative desktop coordinates are
 supported; the halo clips naturally at display edges.
+
+Shortcuts use Windows global hotkey registration with repeat suppression.
+Replacement shortcuts are registered before the old registration is released,
+so a conflict does not disable a working shortcut. Hold mode uses the existing
+frame timer to inspect only the configured chord's current key states after a
+hotkey activation. Hold mode adds no keyboard hook and records no keystroke
+history; the separate auto-hide option still controls its activity-only observer.
 
 **Screen sharing capture is application- and mode-dependent.** Sharing an entire
 display often captures desktop overlays; sharing a single application may omit
