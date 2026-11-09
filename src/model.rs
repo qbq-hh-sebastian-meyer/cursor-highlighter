@@ -14,6 +14,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub auto_hide: bool,
 }
 
 impl Default for Settings {
@@ -23,6 +24,7 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            auto_hide: false,
         }
     }
 }
@@ -103,6 +105,53 @@ impl Settings {
                 .map_err(|e| format!("Failed to clean up settings temp file: {e}"))?;
         }
         result
+    }
+}
+
+pub const IDLE_HIDE_MS: u64 = 1500;
+const FADE_MS: u64 = 180;
+
+pub struct AutoHide {
+    last_moved: u64,
+    typing: bool,
+    updated_at: u64,
+    visibility: f32,
+}
+
+impl AutoHide {
+    pub fn new(now: u64) -> Self {
+        Self {
+            last_moved: now,
+            typing: false,
+            updated_at: now,
+            visibility: 1.0,
+        }
+    }
+
+    pub fn moved(&mut self, now: u64) {
+        self.alpha(now);
+        self.last_moved = now;
+        self.typing = false;
+    }
+
+    pub fn typed(&mut self, now: u64) {
+        self.alpha(now);
+        self.typing = true;
+    }
+
+    pub fn alpha(&mut self, now: u64) -> u8 {
+        let hidden = self.typing || now.saturating_sub(self.last_moved) >= IDLE_HIDE_MS;
+        // Only time after the idle deadline contributes to the fade.
+        let since = if hidden && !self.typing {
+            self.updated_at
+                .max(self.last_moved.saturating_add(IDLE_HIDE_MS))
+        } else {
+            self.updated_at
+        };
+        let step = now.saturating_sub(since) as f32 / FADE_MS as f32;
+        self.visibility = (self.visibility + if hidden { -step } else { step }).clamp(0.0, 1.0);
+        self.updated_at = now;
+        (self.visibility * 255.0).round() as u8
     }
 }
 
@@ -192,6 +241,7 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.auto_hide);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
@@ -236,15 +286,17 @@ mod tests {
 
     #[test]
     fn presentation_presets_preserve_enabled_and_allow_customization() {
-        for enabled in [false, true] {
+        for (enabled, auto_hide) in [(false, false), (false, true), (true, false), (true, true)] {
             let mut settings = Settings {
                 enabled,
+                auto_hide,
                 ..Settings::default()
             };
             for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
                 settings.apply_preset(preset);
                 settings.validate().unwrap();
                 assert_eq!(settings.enabled, enabled);
+                assert_eq!(settings.auto_hide, auto_hide);
                 let expected = match preset {
                     PresentationPreset::Slides => (60, 20, "#FFD43B"),
                     PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
@@ -265,7 +317,7 @@ mod tests {
                         .as_object()
                         .unwrap()
                         .len(),
-                    4
+                    5
                 );
                 settings.diameter = 97;
                 settings.opacity = 31;
@@ -285,6 +337,7 @@ mod tests {
         let path = dir.join("settings.json");
         let mut settings = Settings {
             enabled: false,
+            auto_hide: true,
             ..Settings::default()
         };
         for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
@@ -311,6 +364,7 @@ mod tests {
         let mut settings = Settings {
             diameter: 137,
             enabled: false,
+            auto_hide: true,
             ..Settings::default()
         };
         settings.save(&path).unwrap();
@@ -323,6 +377,42 @@ mod tests {
         assert!(Settings::load(&path).is_err());
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn auto_hide_idle_typing_and_movement() {
+        let mut hide = AutoHide::new(0);
+        assert_eq!(hide.alpha(1499), 255);
+        assert_eq!(hide.alpha(1500), 255);
+        assert_eq!(hide.alpha(1590), 128);
+        assert_eq!(hide.alpha(1680), 0);
+        hide.moved(1680);
+        assert_eq!(hide.alpha(1770), 128);
+        assert_eq!(hide.alpha(1860), 255);
+        hide.typed(1860);
+        assert_eq!(hide.alpha(1950), 128);
+        hide.typed(1950);
+        assert_eq!(hide.alpha(2040), 0);
+        assert_eq!(hide.alpha(10000), 0);
+        hide.moved(10000);
+        assert_eq!(hide.alpha(10180), 255);
+        hide.moved(11000);
+        assert_eq!(hide.alpha(12499), 255);
+        assert_eq!(hide.alpha(12680), 0);
+    }
+
+    #[test]
+    fn auto_hide_events_do_not_apply_past_time_to_new_target() {
+        let mut hide = AutoHide::new(100);
+        hide.typed(1000);
+        assert_eq!(hide.alpha(1000), 255);
+        assert_eq!(hide.alpha(1180), 0);
+        hide.moved(10000);
+        assert_eq!(hide.alpha(10000), 0);
+        assert_eq!(hide.alpha(10180), 255);
+        let mut reset = AutoHide::new(20000);
+        assert_eq!(reset.alpha(21500), 255);
+        assert_eq!(reset.alpha(21680), 0);
     }
 
     #[test]
