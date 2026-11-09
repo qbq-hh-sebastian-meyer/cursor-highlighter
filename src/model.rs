@@ -8,6 +8,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub start_minimized: bool,
 }
 
 impl Default for Settings {
@@ -17,6 +18,7 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            start_minimized: false,
         }
     }
 }
@@ -176,12 +178,24 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.start_minimized);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
         );
         assert!(serde_json::from_str::<Settings>("null").is_err());
         assert!(serde_json::from_str::<Settings>(r#"{"Diameter":-1}"#).is_err());
+    }
+
+    #[test]
+    fn startup_visibility_is_opt_in_and_persisted() {
+        let settings = Settings {
+            start_minimized: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""StartMinimized":true"#));
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
     }
 
     #[test]
@@ -228,6 +242,7 @@ mod tests {
         let mut settings = Settings {
             diameter: 137,
             enabled: false,
+            start_minimized: true,
             ..Settings::default()
         };
         settings.save(&path).unwrap();

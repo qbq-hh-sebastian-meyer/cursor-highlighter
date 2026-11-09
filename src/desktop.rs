@@ -1,4 +1,5 @@
 use crate::model::{ClickFeedback, Settings, render};
+use crate::startup;
 use std::{
     cell::{Cell, RefCell},
     mem::{size_of, zeroed},
@@ -32,6 +33,8 @@ const ID_OPEN: u16 = 107;
 const ID_SIZE_LABEL: u16 = 108;
 const ID_OPACITY_LABEL: u16 = 109;
 const ID_STATUS: u16 = 110;
+const ID_START_MINIMIZED: u16 = 111;
+const ID_LAUNCH_AT_LOGIN: u16 = 112;
 const FRAME_TIMER: usize = 1;
 const SAVE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
@@ -114,6 +117,7 @@ struct App {
     fatal: RefCell<Option<String>>,
     dpi: Cell<u32>,
     taskbar_message: Cell<u32>,
+    launch_at_login: Cell<bool>,
 }
 
 impl App {
@@ -137,6 +141,7 @@ impl App {
             fatal: RefCell::new(None),
             dpi: Cell::new(96),
             taskbar_message: Cell::new(0),
+            launch_at_login: Cell::new(false),
         }
     }
 
@@ -184,7 +189,7 @@ impl App {
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
             let mut bounds = RECT {
                 right: self.scale(450),
-                bottom: self.scale(450),
+                bottom: self.scale(520),
                 ..zeroed()
             };
             check(
@@ -398,21 +403,53 @@ impl App {
             190,
             33,
         )?;
-        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 330, 400, 60)?;
+        let start_minimized = self.add_control(
+            w!("BUTTON"),
+            "Start hidden in the tray",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_START_MINIMIZED,
+            24,
+            326,
+            400,
+            25,
+        )?;
+        let launch_at_login = self.add_control(
+            w!("BUTTON"),
+            "Launch at Windows login (current user)",
+            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
+            ID_LAUNCH_AT_LOGIN,
+            24,
+            357,
+            400,
+            25,
+        )?;
+        self.add_control(w!("STATIC"), "", 0, ID_STATUS, 24, 400, 400, 60)?;
         self.add_control(
             w!("BUTTON"),
             "Hide to tray",
             WS_TABSTOP,
             ID_HIDE,
             24,
-            401,
+            471,
             115,
             32,
         )?;
-        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 401, 85, 32)?;
+        self.add_control(w!("BUTTON"), "Exit", WS_TABSTOP, ID_EXIT, 150, 471, 85, 32)?;
         let settings = self.settings.borrow().clone();
         unsafe {
             SendMessageW(enabled, BM_SETCHECK, usize::from(settings.enabled), 0);
+            SendMessageW(
+                start_minimized,
+                BM_SETCHECK,
+                usize::from(settings.start_minimized),
+                0,
+            );
+            SendMessageW(
+                launch_at_login,
+                BM_SETCHECK,
+                usize::from(self.launch_at_login.get()),
+                0,
+            );
             for (slider, min, max, value, frequency) in [
                 (diameter, 24, 240, settings.diameter, 24),
                 (opacity, 5, 80, settings.opacity, 5),
@@ -641,6 +678,35 @@ impl App {
                 self.changed()?;
             }
             ID_COLOR => self.choose_color()?,
+            ID_START_MINIMIZED => {
+                self.settings.borrow_mut().start_minimized = unsafe {
+                    SendMessageW(self.control(ID_START_MINIMIZED), BM_GETCHECK, 0, 0)
+                        == BST_CHECKED as isize
+                };
+                self.changed()?;
+            }
+            ID_LAUNCH_AT_LOGIN => {
+                let requested = unsafe {
+                    SendMessageW(self.control(ID_LAUNCH_AT_LOGIN), BM_GETCHECK, 0, 0)
+                        == BST_CHECKED as isize
+                };
+                match startup::set_enabled(requested) {
+                    Ok(()) => self.launch_at_login.set(requested),
+                    Err(error) => {
+                        unsafe {
+                            SendMessageW(
+                                self.control(ID_LAUNCH_AT_LOGIN),
+                                BM_SETCHECK,
+                                usize::from(self.launch_at_login.get()),
+                                0,
+                            );
+                        }
+                        self.warning(&format!(
+                            "Could not change launch at Windows login.\r\n\r\n{error}"
+                        ));
+                    }
+                }
+            }
             ID_HIDE => {
                 self.save();
                 unsafe {
@@ -971,7 +1037,9 @@ unsafe extern "system" fn settings_proc(
                 }
                 return Some(1);
             }
-            WM_COMMAND => app.command((wp & 0xFFFF) as u16),
+            WM_COMMAND if (wp >> 16) & 0xFFFF == BN_CLICKED as usize => {
+                app.command((wp & 0xFFFF) as u16)
+            }
             WM_HSCROLL => {
                 let slider = lp as HWND;
                 let value = unsafe { SendMessageW(slider, TBM_GETPOS, 0, 0) } as u32;
@@ -1089,10 +1157,29 @@ pub fn run() -> Result<(), String> {
             )),
         ),
     };
+    let visible = !settings.start_minimized;
+    let login = startup::enabled();
     let app = Box::new(App::new(settings, path));
+    if let Ok(enabled) = &login {
+        app.launch_at_login.set(*enabled);
+    }
     CURRENT.with(|current| current.set(&*app));
     let result = (|| {
-        app.setup(true)?;
+        app.setup(visible)?;
+        if let Err(error) = login {
+            unsafe {
+                SendMessageW(
+                    app.control(ID_LAUNCH_AT_LOGIN),
+                    BM_SETCHECK,
+                    BST_INDETERMINATE as usize,
+                    0,
+                );
+                EnableWindow(app.control(ID_LAUNCH_AT_LOGIN), 0);
+            }
+            app.warning(&format!(
+                "Could not read launch-at-login settings. That control is unavailable until you restart the app.\r\n\r\n{error}"
+            ));
+        }
         if let Some(message) = warning {
             app.warning(&message);
         }
@@ -1168,6 +1255,21 @@ fn native_checks() -> Result<(), String> {
                 "native low-level mouse hook installed",
             )?;
             ensure(app.tray_added.get(), "notification icon registered")?;
+            ensure(
+                IsWindowVisible(app.window.get()) == 0,
+                "hidden startup leaves Settings hidden with a usable tray",
+            )?;
+            ensure(
+                SendMessageW(app.control(ID_START_MINIMIZED), BM_GETCHECK, 0, 0) == 0
+                    && SendMessageW(app.control(ID_LAUNCH_AT_LOGIN), BM_GETCHECK, 0, 0) == 0,
+                "startup controls are opt-in",
+            )?;
+            SendMessageW(app.control(ID_START_MINIMIZED), BM_CLICK, 0, 0);
+            ensure(
+                app.settings.borrow().start_minimized,
+                "native hidden-startup preference notification",
+            )?;
+            SendMessageW(app.control(ID_START_MINIMIZED), BM_CLICK, 0, 0);
             ensure(
                 GetWindowLongPtrW(app.control(ID_COLOR), GWL_STYLE) as u32 & 0xF
                     == BS_OWNERDRAW as u32,
