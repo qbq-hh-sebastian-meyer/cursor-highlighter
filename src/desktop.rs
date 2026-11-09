@@ -3194,10 +3194,22 @@ mod activation_tests {
             app.add_controls().unwrap();
             CURRENT.with(|current| current.set(&*app));
             let _current = CurrentApp;
-            let foreground = GetForegroundWindow();
+            let assert_no_test_focus = || {
+                let foreground = GetForegroundWindow();
+                for window in [app.window.get(), app.updates_window.get()] {
+                    if !window.is_null() {
+                        assert_ne!(foreground, window, "A hidden test window took focus");
+                        assert_eq!(
+                            IsChild(window, foreground),
+                            0,
+                            "A hidden test control took focus"
+                        );
+                    }
+                }
+            };
             app.updates_dialog(false).unwrap();
             assert_eq!(IsWindowVisible(app.updates_window.get()), 0);
-            assert_eq!(GetForegroundWindow(), foreground);
+            assert_no_test_focus();
             assert_eq!(
                 SendMessageW(app.control(ID_UPDATE_AUTO), BM_GETCHECK, 0, 0),
                 BST_CHECKED as isize
@@ -3234,7 +3246,7 @@ mod activation_tests {
             assert_ne!(IsWindowEnabled(app.window.get()), 0);
             SendMessageW(app.updates_window.get(), WM_CLOSE, 0, 0);
             assert_eq!(IsWindowVisible(app.updates_window.get()), 0);
-            assert_eq!(GetForegroundWindow(), foreground);
+            assert_no_test_focus();
             assert!(app.fatal.borrow().is_none());
             app.dirty.set(false);
         }
