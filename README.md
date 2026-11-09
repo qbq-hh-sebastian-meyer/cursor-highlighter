@@ -3,7 +3,8 @@
 A small **Rust application with a native Win32 UI** for Windows 10/11. It puts a
 colored, translucent halo around the actual desktop cursor across normal desktop
 applications. No screen dimming, click interception, browser/webview, .NET runtime,
-administrator privileges, background service, or startup registration.
+administrator privileges or background service. Launch at Windows login is
+available as an explicit opt-in; nothing is registered by default.
 
 ## Download
 
@@ -66,6 +67,12 @@ machine or use the MSVC cross-compilation instructions below.
   menu still work.
 - **Hide to tray** leaves the halo running. Double-click the notification icon or
   right-click it and select **Settings** to reopen the window.
+- **Start hidden in the tray** skips showing Settings on subsequent launches;
+  the halo and notification icon still run. Default: off.
+- **Launch at Windows login (current user)** registers this executable for your
+  Windows account, without administrator privileges. Default: off. Turn it off
+  to remove the entry. This is independent of starting hidden: enable both for
+  quiet startup at login.
 - **Exit**, the tray's **Exit**, or closing Settings stops the app. Minimizing
   only minimizes Settings.
 
@@ -81,6 +88,18 @@ active in memory. Settings are written to a temporary file then atomically
 replaced.
 The optional `ScaleWithDpi` JSON boolean persists the DPI sizing choice. Older
 settings files without this field retain physical-pixel sizing.
+
+Launch-at-login registration uses only the `CursorHighlighter` value in
+`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, with the full
+executable path quoted. Its checkbox reflects whether that entry exists rather
+than a potentially stale JSON preference. Registration changes only when you
+click the checkbox, never when loading or saving settings. Errors are shown and
+the checkbox is restored on failure; if the entry cannot be read, the control is
+disabled until restart. Windows may delay startup or disable it through Task
+Manager's Startup apps settings. Exit does not unregister it. Keep the executable
+in a stable location; turn the option off before moving/deleting it, then enable
+it again from the new location. Paths exceeding Windows' 260-character Run
+command limit cannot be registered.
 
 Only one app instance is allowed per Windows session. Exit any older C# build
 before starting the Rust build; they intentionally share the same instance guard.
@@ -178,6 +197,9 @@ A hidden-window test checks DPI lookup and monitor selection on attached display
 without moving the real cursor, showing an overlay, taking focus, installing
 hooks, or changing user settings. Simulated transitions and hidden-window checks
 do not establish physical mixed-DPI cursor behavior.
+Startup tests cover default-off JSON compatibility and quoted executable commands
+(including spaces, Unicode, UNC paths, and invalid/overlong input). Tests never
+register the app for login or change real user settings.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
@@ -206,6 +228,7 @@ Before a presentation, also verify interactively:
 `src\desktop.rs` owns the native windows, controls, tray, timers, hook, color
 dialog, shortcut, and GDI resources on one UI thread. `src\model.rs` contains
 settings, click/auto-hide timing, and anti-aliased premultiplied BGRA rendering.
+`src\startup.rs` owns the current-user launch-at-login registry entry.
 
 The halo is a per-pixel-alpha, click-through, non-activating layered topmost
 window. A 16 ms timer follows desktop cursor coordinates; only appearance changes

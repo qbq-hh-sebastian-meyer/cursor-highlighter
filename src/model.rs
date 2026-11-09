@@ -14,6 +14,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub start_minimized: bool,
     pub scale_with_dpi: bool,
     pub auto_hide: bool,
 }
@@ -25,6 +26,7 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            start_minimized: false,
             scale_with_dpi: false,
             auto_hide: false,
         }
@@ -258,6 +260,7 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.start_minimized);
         assert!(!value.scale_with_dpi);
         assert!(!value.auto_hide);
         assert_eq!(
@@ -266,6 +269,17 @@ mod tests {
         );
         assert!(serde_json::from_str::<Settings>("null").is_err());
         assert!(serde_json::from_str::<Settings>(r#"{"Diameter":-1}"#).is_err());
+    }
+
+    #[test]
+    fn startup_visibility_is_opt_in_and_persisted() {
+        let settings = Settings {
+            start_minimized: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""StartMinimized":true"#));
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
     }
 
     #[test]
@@ -388,6 +402,7 @@ mod tests {
                 enabled,
                 auto_hide,
                 scale_with_dpi,
+                start_minimized: true,
                 ..Settings::default()
             };
             for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
@@ -396,6 +411,7 @@ mod tests {
                 assert_eq!(settings.enabled, enabled);
                 assert_eq!(settings.auto_hide, auto_hide);
                 assert_eq!(settings.scale_with_dpi, scale_with_dpi);
+                assert!(settings.start_minimized);
                 let expected = match preset {
                     PresentationPreset::Slides => (60, 20, "#FFD43B"),
                     PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
@@ -420,7 +436,7 @@ mod tests {
                         .as_object()
                         .unwrap()
                         .len(),
-                    6
+                    7
                 );
                 settings.diameter = 97;
                 settings.opacity = 31;
@@ -468,6 +484,7 @@ mod tests {
         let mut settings = Settings {
             diameter: 137,
             enabled: false,
+            start_minimized: true,
             scale_with_dpi: true,
             auto_hide: true,
             ..Settings::default()

@@ -2,6 +2,7 @@
 
 mod desktop;
 mod model;
+mod startup;
 
 fn main() {
     let self_test = std::env::args().any(|arg| arg == "--self-test");
