@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+#[derive(Clone, Copy, Debug)]
+pub enum PresentationPreset {
+    Slides,
+    LiveDemo,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Settings {
@@ -22,6 +28,16 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn apply_preset(&mut self, preset: PresentationPreset) {
+        let (diameter, opacity, color) = match preset {
+            PresentationPreset::Slides => (60, 20, "#FFD43B"),
+            PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
+        };
+        self.diameter = diameter;
+        self.opacity = opacity;
+        self.color_hex = color.into();
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !(24..=240).contains(&self.diameter) || !(5..=80).contains(&self.opacity) {
             return Err("Settings require a diameter of 24-240 px and opacity of 5-80%.".into());
@@ -216,6 +232,73 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn presentation_presets_preserve_enabled_and_allow_customization() {
+        for enabled in [false, true] {
+            let mut settings = Settings {
+                enabled,
+                ..Settings::default()
+            };
+            for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
+                settings.apply_preset(preset);
+                settings.validate().unwrap();
+                assert_eq!(settings.enabled, enabled);
+                let expected = match preset {
+                    PresentationPreset::Slides => (60, 20, "#FFD43B"),
+                    PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
+                };
+                assert_eq!(
+                    (
+                        settings.diameter,
+                        settings.opacity,
+                        settings.color_hex.as_str()
+                    ),
+                    expected
+                );
+                let text = serde_json::to_string(&settings).unwrap();
+                assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), settings);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .len(),
+                    4
+                );
+                settings.diameter = 97;
+                settings.opacity = 31;
+                settings.color_hex = "#123456".into();
+                settings.validate().unwrap();
+                assert_eq!(settings.diameter, 97);
+                assert_eq!(settings.opacity, 31);
+                assert_eq!(settings.rgb().unwrap(), [18, 52, 86]);
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_presets_persist_with_existing_settings_schema() {
+        let dir =
+            std::env::temp_dir().join(format!("CursorHighlighter.Presets-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let mut settings = Settings {
+            enabled: false,
+            ..Settings::default()
+        };
+        for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
+            settings.apply_preset(preset);
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap(), settings);
+            settings.diameter = 97;
+            settings.opacity = 31;
+            settings.color_hex = "#123456".into();
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap(), settings);
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 
     #[test]
