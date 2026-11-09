@@ -1,0 +1,122 @@
+name: Windows release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          cargo --version
+
+      - name: Check version tag
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = $metadata.packages | Where-Object name -eq 'cursor-highlighter'
+          if ($env:RELEASE_TAG -cne "v$($package.version)") {
+            throw "Release tag must match Cargo.toml version: v$($package.version)"
+          }
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --target ${{ matrix.target }} --locked -- -D warnings
+
+      - name: Run unit tests
+        run: cargo test --target ${{ matrix.target }} --locked
+
+      - name: Build release executable
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Package executable and checksum
+        env:
+          BUILD_ARCH: ${{ matrix.arch }}
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          $executable = "target\$env:BUILD_TARGET\release\cursor-highlighter.exe"
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $executable))
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $expected = if ($env:BUILD_ARCH -eq 'arm64') { 0xAA64 } else { 0x8664 }
+          if ($machine -ne $expected) { throw "Executable architecture mismatch: $machine" }
+          New-Item -ItemType Directory -Path dist, package | Out-Null
+          Copy-Item $executable 'package\cursor-highlighter.exe'
+          Copy-Item README.md 'package\README.md'
+          $archive = "cursor-highlighter-windows-$env:BUILD_ARCH.zip"
+          Compress-Archive -Path 'package\*' -DestinationPath "dist\$archive"
+          $hash = (Get-FileHash "dist\$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content "dist\$archive.sha256" -Encoding ascii
+
+      - name: Upload release package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cursor-highlighter-windows-${{ matrix.arch }}
+          path: dist\*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download both architecture packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: cursor-highlighter-windows-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" dist/*.zip dist/*.sha256 \
+            --verify-tag \
+            --title "Cursor Highlighter $RELEASE_TAG" \
+            --generate-notes
