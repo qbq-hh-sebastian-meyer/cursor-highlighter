@@ -8,6 +8,7 @@ pub struct Settings {
     pub opacity: u32,
     pub color_hex: String,
     pub enabled: bool,
+    pub scale_with_dpi: bool,
 }
 
 impl Default for Settings {
@@ -17,14 +18,30 @@ impl Default for Settings {
             opacity: 35,
             color_hex: "#FFD43B".into(),
             enabled: true,
+            scale_with_dpi: false,
         }
     }
 }
 
 impl Settings {
+    pub fn pixel_diameter(&self, dpi: u32) -> Result<u32, String> {
+        self.validate()?;
+        if !self.scale_with_dpi {
+            return Ok(self.diameter);
+        }
+        if dpi == 0 {
+            return Err("The monitor reported zero DPI.".into());
+        }
+        self.diameter
+            .checked_mul(dpi)
+            .and_then(|value| value.checked_add(48))
+            .map(|value| (value / 96).max(1))
+            .ok_or_else(|| "The scaled halo diameter is too large.".into())
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !(24..=240).contains(&self.diameter) || !(5..=80).contains(&self.opacity) {
-            return Err("Settings require a diameter of 24-240 px and opacity of 5-80%.".into());
+            return Err("Settings require a size of 24-240 and opacity of 5-80%.".into());
         }
         self.rgb().map(|_| ())
     }
@@ -131,14 +148,14 @@ impl ClickFeedback {
 }
 
 // A top-down premultiplied BGRA image, directly suitable for UpdateLayeredWindow.
-pub fn render(settings: &Settings, feedback: f32) -> Result<Vec<u8>, String> {
-    settings.validate()?;
+pub fn render(settings: &Settings, feedback: f32, dpi: u32) -> Result<Vec<u8>, String> {
+    let diameter = settings.pixel_diameter(dpi)?;
     let rgb = settings.rgb()?;
     let amount = feedback.clamp(0.0, 1.0);
-    let size = settings.diameter as usize + 4;
+    let size = diameter as usize + 4;
     let center = size as f32 / 2.0;
-    let rx = settings.diameter as f32 * (1.0 - 0.04 * amount) / 2.0;
-    let ry = settings.diameter as f32 * (1.0 - 0.18 * amount) / 2.0;
+    let rx = diameter as f32 * (1.0 - 0.04 * amount) / 2.0;
+    let ry = diameter as f32 * (1.0 - 0.18 * amount) / 2.0;
     let brightness = 1.0 - 0.35 * amount;
     let mut pixels = vec![0; size * size * 4];
     for y in 0..size {
@@ -176,6 +193,7 @@ mod tests {
         assert_eq!(value.diameter, 137);
         assert_eq!(value.rgb().unwrap(), [18, 86, 171]);
         assert!(!value.enabled);
+        assert!(!value.scale_with_dpi);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
@@ -219,6 +237,76 @@ mod tests {
     }
 
     #[test]
+    fn dpi_sizing_is_opt_in_and_rounds_to_nearest_pixel() {
+        let mut settings = Settings::default();
+        for dpi in [96, 120, 144, 168, 192, 240, 288, 384, 480] {
+            assert_eq!(settings.pixel_diameter(dpi).unwrap(), 80);
+        }
+        settings.scale_with_dpi = true;
+        for (dpi, expected) in [(96, 80), (120, 100), (144, 120), (192, 160), (480, 400)] {
+            assert_eq!(settings.pixel_diameter(dpi).unwrap(), expected);
+        }
+        settings.diameter = 137;
+        assert_eq!(settings.pixel_diameter(120).unwrap(), 171);
+        assert_eq!(settings.pixel_diameter(144).unwrap(), 206);
+        assert!(settings.pixel_diameter(0).is_err());
+        assert!(settings.pixel_diameter(u32::MAX).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"ScaleWithDpi":"yes"}"#).is_err());
+        assert!(
+            serde_json::to_string(&settings)
+                .unwrap()
+                .contains(r#""ScaleWithDpi":true"#)
+        );
+    }
+
+    #[test]
+    fn dpi_rendering_preserves_logical_size_and_click_feedback_across_transitions() {
+        for diameter in [24, 81, 137, 240] {
+            let mut settings = Settings {
+                diameter,
+                scale_with_dpi: true,
+                ..Settings::default()
+            };
+            for dpi in [96, 144, 192, 120, 96] {
+                let pixels = settings.pixel_diameter(dpi).unwrap();
+                assert!((pixels * 96).abs_diff(diameter * dpi) <= 48);
+                for feedback in [0.0, 0.5, 1.0] {
+                    let scaled = render(&settings, feedback, dpi).unwrap();
+                    let physical = render(
+                        &Settings {
+                            diameter: pixels,
+                            ..Settings::default()
+                        },
+                        feedback,
+                        96,
+                    );
+                    if pixels <= 240 {
+                        assert_eq!(scaled, physical.unwrap());
+                    } else {
+                        assert!(physical.is_err());
+                    }
+                    let size = pixels as usize + 4;
+                    let center = (size / 2 * size + size / 2) * 4;
+                    assert_eq!(scaled.len(), size * size * 4);
+                    assert_eq!(&scaled[..4], &[0; 4]);
+                    assert_eq!(
+                        scaled[center + 3],
+                        (settings.opacity as f32 * 2.55).round() as u8
+                    );
+                    for pixel in scaled.as_chunks::<4>().0 {
+                        assert!(pixel[..3].iter().all(|&channel| channel <= pixel[3]));
+                    }
+                }
+            }
+            settings.scale_with_dpi = false;
+            assert_eq!(
+                render(&settings, 0.0, 192).unwrap(),
+                render(&settings, 0.0, 96).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn atomic_settings_round_trip_and_corruption() {
         let dir =
             std::env::temp_dir().join(format!("CursorHighlighter.Rust-{}", std::process::id()));
@@ -228,11 +316,13 @@ mod tests {
         let mut settings = Settings {
             diameter: 137,
             enabled: false,
+            scale_with_dpi: true,
             ..Settings::default()
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         settings.opacity = 65;
+        settings.scale_with_dpi = false;
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         assert!(!path.with_extension("json.tmp").exists());
@@ -273,8 +363,8 @@ mod tests {
                     opacity,
                     ..Settings::default()
                 };
-                let normal = render(&settings, 0.0).unwrap();
-                let pressed = render(&settings, 1.0).unwrap();
+                let normal = render(&settings, 0.0, 96).unwrap();
+                let pressed = render(&settings, 1.0, 96).unwrap();
                 let size = diameter as usize + 4;
                 let center = (size / 2 * size + size / 2) * 4;
                 assert_eq!(normal.len(), size * size * 4);

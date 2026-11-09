@@ -31,7 +31,15 @@ machine or use the MSVC cross-compilation instructions below.
 ## Controls
 
 - **Highlight cursor** enables or disables the halo.
-- **Size** adjusts the diameter from 24 to 240 physical screen pixels.
+- **Size** adjusts the diameter from 24 to 240 physical screen pixels by default.
+- **Scale size with monitor DPI** switches Size to logical pixels at 96 DPI.
+  The halo follows the Windows scaling of the monitor under the cursor: an
+  80-unit diameter renders as 80 pixels at 100%, 120 at 150%, and 160 at 200%.
+  This keeps its perceived size consistent with other Windows UI across laptop
+  and external displays. Uncheck it to restore fixed physical-pixel sizing.
+  The Size label identifies the current units; the saved size value does not
+  change when switching modes. Windows scaling, not measured panel dimensions,
+  determines the result.
 - **Opacity** adjusts transparency from 5% to 80%.
 - **Choose...** previews the current halo color on the button, with contrasting
   text, and opens the standard Windows color picker.
@@ -47,7 +55,7 @@ machine or use the MSVC cross-compilation instructions below.
 - **Exit**, the tray's **Exit**, or closing Settings stops the app. Minimizing
   only minimizes Settings.
 
-Defaults: 80 px diameter, yellow (`#FFD43B`), 35% opacity.
+Defaults: 80 physical px diameter (DPI scaling off), yellow (`#FFD43B`), 35% opacity.
 Settings changes apply immediately and save after a 400 ms debounce, on hide,
 and on exit to `%LOCALAPPDATA%\CursorHighlighter\settings.json`.
 **Existing settings from the previous C# version are preserved**: the file path
@@ -55,6 +63,8 @@ and PascalCase JSON fields have not changed. Corrupt/unreadable files show a
 warning and use defaults. Save failures show a warning while changes remain
 active in memory. Settings are written to a temporary file then atomically
 replaced.
+The optional `ScaleWithDpi` JSON boolean persists the DPI sizing choice. Older
+settings files without this field retain physical-pixel sizing.
 
 Only one app instance is allowed per Windows session. Exit any older C# build
 before starting the Rust build; they intentionally share the same instance guard.
@@ -142,12 +152,19 @@ cargo run --locked -- --self-test
 
 Unit tests cover C# settings compatibility, validation, atomic persistence,
 click/release/overlapping-button timing, alpha, color darkening, deformation,
-and premultiplied rendering across sizes and opacity values.
+and premultiplied rendering across sizes and opacity values. DPI tests cover
+opt-in defaults, persistence in both modes, fractional-scale rounding, simulated
+monitor transitions, larger scaled bitmaps, and negative-coordinate centering.
+A hidden-window test checks DPI lookup and monitor selection on attached displays
+without moving the real cursor, showing an overlay, taking focus, installing
+hooks, or changing user settings. Simulated transitions and hidden-window checks
+do not establish physical mixed-DPI cursor behavior.
 
 `--self-test` additionally creates real native windows and exercises the
 notification icon, hook installation, custom window icons, click-through and
 no-activation behavior, cursor centering, topmost placement, native controls,
-hotkey dispatch, settings persistence, DPI-scaled control layout, and actual
+hotkey dispatch, settings persistence, DPI-scaled control layout, live DPI sizing
+checkbox changes, and actual
 desktop compositing for both the normal and pressed halo. It uses an isolated
 temporary settings file, never overwriting your settings. Close the running app
 first, keep the desktop unlocked, and leave the cursor still over a static area
@@ -156,7 +173,9 @@ click feedback; it does not inject real clicks into your desktop.
 
 Before a presentation, also verify interactively:
 
-1. Move the pointer across all monitors, including mixed-DPI displays.
+1. Move the pointer across all monitors, including mixed-DPI displays. Check both
+   sizing modes, monitor boundaries, and displays left of or above the primary
+   display; repeat while holding a mouse button and after changing display scale.
 2. Click, drag, scroll, and type in the applications you plan to present.
 3. Check the audience's view or a test recording in your sharing application.
 
@@ -171,9 +190,14 @@ The halo is a per-pixel-alpha, click-through, non-activating layered topmost
 window. A 16 ms timer follows desktop cursor coordinates; only appearance changes
 regenerate its bitmap. The low-level mouse hook observes button transitions and
 always forwards input without rendering inside the callback. Per-monitor V2 DPI
-awareness keeps halo dimensions in physical pixels and scales Settings on monitor
-changes. Negative desktop coordinates are supported; the halo clips naturally at
-display edges.
+awareness scales Settings on monitor changes. Halo dimensions remain fixed in
+physical pixels by default. When DPI sizing is enabled, a hidden, non-activating
+1-pixel window selects the cursor's monitor and `GetDpiForWindow` reads its current
+effective DPI. This avoids selecting a monitor based on the larger halo's area
+when it straddles a boundary. The frame timer regenerates the bitmap when the
+scaled diameter changes, including while click feedback is active. DPI lookup
+and positioning use the same cursor sample. Negative desktop coordinates are
+supported; the halo clips naturally at display edges.
 
 **Screen sharing capture is application- and mode-dependent.** Sharing an entire
 display often captures desktop overlays; sharing a single application may omit
