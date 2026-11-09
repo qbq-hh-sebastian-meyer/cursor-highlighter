@@ -2031,7 +2031,9 @@ unsafe extern "system" fn updates_proc(
         let result = match message {
             WM_CLOSE => {
                 unsafe {
-                    ShowWindow(window, SW_HIDE);
+                    if IsWindowVisible(window) != 0 {
+                        ShowWindow(window, SW_HIDE);
+                    }
                 }
                 Ok(())
             }
@@ -3244,6 +3246,7 @@ mod activation_tests {
             app.updates.borrow_mut().installing = false;
             app.refresh_updates().unwrap();
             assert_ne!(IsWindowEnabled(app.window.get()), 0);
+            assert_no_test_focus();
             SendMessageW(app.updates_window.get(), WM_CLOSE, 0, 0);
             assert_eq!(IsWindowVisible(app.updates_window.get()), 0);
             assert_no_test_focus();
