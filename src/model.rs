@@ -109,6 +109,12 @@ impl Shortcut {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum PresentationPreset {
+    Slides,
+    LiveDemo,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Settings {
@@ -118,6 +124,9 @@ pub struct Settings {
     pub enabled: bool,
     pub shortcut: Shortcut,
     pub activation_mode: ActivationMode,
+    pub start_minimized: bool,
+    pub scale_with_dpi: bool,
+    pub auto_hide: bool,
 }
 
 impl Default for Settings {
@@ -129,14 +138,42 @@ impl Default for Settings {
             enabled: true,
             shortcut: Shortcut::default(),
             activation_mode: ActivationMode::default(),
+            start_minimized: false,
+            scale_with_dpi: false,
+            auto_hide: false,
         }
     }
 }
 
 impl Settings {
+    pub fn pixel_diameter(&self, dpi: u32) -> Result<u32, String> {
+        self.validate()?;
+        if !self.scale_with_dpi {
+            return Ok(self.diameter);
+        }
+        if dpi == 0 {
+            return Err("The monitor reported zero DPI.".into());
+        }
+        self.diameter
+            .checked_mul(dpi)
+            .and_then(|value| value.checked_add(48))
+            .map(|value| (value / 96).max(1))
+            .ok_or_else(|| "The scaled halo diameter is too large.".into())
+    }
+
+    pub fn apply_preset(&mut self, preset: PresentationPreset) {
+        let (diameter, opacity, color) = match preset {
+            PresentationPreset::Slides => (60, 20, "#FFD43B"),
+            PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
+        };
+        self.diameter = diameter;
+        self.opacity = opacity;
+        self.color_hex = color.into();
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !(24..=240).contains(&self.diameter) || !(5..=80).contains(&self.opacity) {
-            return Err("Settings require a diameter of 24-240 px and opacity of 5-80%.".into());
+            return Err("Settings require a size of 24-240 and opacity of 5-80%.".into());
         }
         self.shortcut.validate()?;
         self.rgb().map(|_| ())
@@ -203,6 +240,53 @@ impl Settings {
     }
 }
 
+pub const IDLE_HIDE_MS: u64 = 1500;
+const FADE_MS: u64 = 180;
+
+pub struct AutoHide {
+    last_moved: u64,
+    typing: bool,
+    updated_at: u64,
+    visibility: f32,
+}
+
+impl AutoHide {
+    pub fn new(now: u64) -> Self {
+        Self {
+            last_moved: now,
+            typing: false,
+            updated_at: now,
+            visibility: 1.0,
+        }
+    }
+
+    pub fn moved(&mut self, now: u64) {
+        self.alpha(now);
+        self.last_moved = now;
+        self.typing = false;
+    }
+
+    pub fn typed(&mut self, now: u64) {
+        self.alpha(now);
+        self.typing = true;
+    }
+
+    pub fn alpha(&mut self, now: u64) -> u8 {
+        let hidden = self.typing || now.saturating_sub(self.last_moved) >= IDLE_HIDE_MS;
+        // Only time after the idle deadline contributes to the fade.
+        let since = if hidden && !self.typing {
+            self.updated_at
+                .max(self.last_moved.saturating_add(IDLE_HIDE_MS))
+        } else {
+            self.updated_at
+        };
+        let step = now.saturating_sub(since) as f32 / FADE_MS as f32;
+        self.visibility = (self.visibility + if hidden { -step } else { step }).clamp(0.0, 1.0);
+        self.updated_at = now;
+        (self.visibility * 255.0).round() as u8
+    }
+}
+
 #[derive(Default)]
 pub struct ClickFeedback {
     buttons: u8,
@@ -244,14 +328,14 @@ impl ClickFeedback {
 }
 
 // A top-down premultiplied BGRA image, directly suitable for UpdateLayeredWindow.
-pub fn render(settings: &Settings, feedback: f32) -> Result<Vec<u8>, String> {
-    settings.validate()?;
+pub fn render(settings: &Settings, feedback: f32, dpi: u32) -> Result<Vec<u8>, String> {
+    let diameter = settings.pixel_diameter(dpi)?;
     let rgb = settings.rgb()?;
     let amount = feedback.clamp(0.0, 1.0);
-    let size = settings.diameter as usize + 4;
+    let size = diameter as usize + 4;
     let center = size as f32 / 2.0;
-    let rx = settings.diameter as f32 * (1.0 - 0.04 * amount) / 2.0;
-    let ry = settings.diameter as f32 * (1.0 - 0.18 * amount) / 2.0;
+    let rx = diameter as f32 * (1.0 - 0.04 * amount) / 2.0;
+    let ry = diameter as f32 * (1.0 - 0.18 * amount) / 2.0;
     let brightness = 1.0 - 0.35 * amount;
     let mut pixels = vec![0; size * size * 4];
     for y in 0..size {
@@ -291,6 +375,9 @@ mod tests {
         assert!(!value.enabled);
         assert_eq!(value.shortcut, Shortcut::default());
         assert_eq!(value.activation_mode, ActivationMode::Toggle);
+        assert!(!value.start_minimized);
+        assert!(!value.scale_with_dpi);
+        assert!(!value.auto_hide);
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
             Settings::default()
@@ -369,6 +456,17 @@ mod tests {
     }
 
     #[test]
+    fn startup_visibility_is_opt_in_and_persisted() {
+        let settings = Settings {
+            start_minimized: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""StartMinimized":true"#));
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), settings);
+    }
+
+    #[test]
     fn rejects_invalid_settings() {
         for diameter in [0, 23, 241, u32::MAX] {
             assert!(
@@ -403,6 +501,173 @@ mod tests {
     }
 
     #[test]
+    fn dpi_sizing_is_opt_in_and_rounds_to_nearest_pixel() {
+        let mut settings = Settings::default();
+        for dpi in [96, 120, 144, 168, 192, 240, 288, 384, 480] {
+            assert_eq!(settings.pixel_diameter(dpi).unwrap(), 80);
+        }
+        settings.scale_with_dpi = true;
+        for (dpi, expected) in [(96, 80), (120, 100), (144, 120), (192, 160), (480, 400)] {
+            assert_eq!(settings.pixel_diameter(dpi).unwrap(), expected);
+        }
+        settings.diameter = 137;
+        assert_eq!(settings.pixel_diameter(120).unwrap(), 171);
+        assert_eq!(settings.pixel_diameter(144).unwrap(), 206);
+        assert!(settings.pixel_diameter(0).is_err());
+        assert!(settings.pixel_diameter(u32::MAX).is_err());
+        assert!(serde_json::from_str::<Settings>(r#"{"ScaleWithDpi":"yes"}"#).is_err());
+        assert!(
+            serde_json::to_string(&settings)
+                .unwrap()
+                .contains(r#""ScaleWithDpi":true"#)
+        );
+    }
+
+    #[test]
+    fn dpi_rendering_preserves_logical_size_and_click_feedback_across_transitions() {
+        for diameter in [24, 81, 137, 240] {
+            let mut settings = Settings {
+                diameter,
+                scale_with_dpi: true,
+                ..Settings::default()
+            };
+            for dpi in [96, 144, 192, 120, 96] {
+                let pixels = settings.pixel_diameter(dpi).unwrap();
+                assert!((pixels * 96).abs_diff(diameter * dpi) <= 48);
+                for feedback in [0.0, 0.5, 1.0] {
+                    let scaled = render(&settings, feedback, dpi).unwrap();
+                    let physical = render(
+                        &Settings {
+                            diameter: pixels,
+                            ..Settings::default()
+                        },
+                        feedback,
+                        96,
+                    );
+                    if pixels <= 240 {
+                        assert_eq!(scaled, physical.unwrap());
+                    } else {
+                        assert!(physical.is_err());
+                    }
+                    let size = pixels as usize + 4;
+                    let center = (size / 2 * size + size / 2) * 4;
+                    assert_eq!(scaled.len(), size * size * 4);
+                    assert_eq!(&scaled[..4], &[0; 4]);
+                    assert_eq!(
+                        scaled[center + 3],
+                        (settings.opacity as f32 * 2.55).round() as u8
+                    );
+                    for pixel in scaled.as_chunks::<4>().0 {
+                        assert!(pixel[..3].iter().all(|&channel| channel <= pixel[3]));
+                    }
+                }
+            }
+            settings.scale_with_dpi = false;
+            assert_eq!(
+                render(&settings, 0.0, 192).unwrap(),
+                render(&settings, 0.0, 96).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_presets_preserve_enabled_and_allow_customization() {
+        for (enabled, auto_hide, scale_with_dpi) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, false),
+            (false, true, true),
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (true, true, true),
+        ] {
+            let mut settings = Settings {
+                enabled,
+                auto_hide,
+                scale_with_dpi,
+                start_minimized: true,
+                activation_mode: ActivationMode::Hold,
+                shortcut: Shortcut::parse("Ctrl + Shift + F9").unwrap(),
+                ..Settings::default()
+            };
+            for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
+                settings.apply_preset(preset);
+                settings.validate().unwrap();
+                assert_eq!(settings.enabled, enabled);
+                assert_eq!(settings.auto_hide, auto_hide);
+                assert_eq!(settings.scale_with_dpi, scale_with_dpi);
+                assert!(settings.start_minimized);
+                assert_eq!(settings.activation_mode, ActivationMode::Hold);
+                assert_eq!(
+                    settings.shortcut,
+                    Shortcut::parse("Ctrl + Shift + F9").unwrap()
+                );
+                let expected = match preset {
+                    PresentationPreset::Slides => (60, 20, "#FFD43B"),
+                    PresentationPreset::LiveDemo => (120, 50, "#FF922B"),
+                };
+                assert_eq!(
+                    (
+                        settings.diameter,
+                        settings.opacity,
+                        settings.color_hex.as_str()
+                    ),
+                    expected
+                );
+                assert_eq!(
+                    settings.pixel_diameter(192).unwrap(),
+                    expected.0 * if scale_with_dpi { 2 } else { 1 }
+                );
+                let text = serde_json::to_string(&settings).unwrap();
+                assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), settings);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .len(),
+                    9
+                );
+                settings.diameter = 97;
+                settings.opacity = 31;
+                settings.color_hex = "#123456".into();
+                settings.validate().unwrap();
+                assert_eq!(settings.diameter, 97);
+                assert_eq!(settings.opacity, 31);
+                assert_eq!(settings.rgb().unwrap(), [18, 52, 86]);
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_presets_persist_with_existing_settings_schema() {
+        let dir =
+            std::env::temp_dir().join(format!("CursorHighlighter.Presets-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let mut settings = Settings {
+            enabled: false,
+            auto_hide: true,
+            scale_with_dpi: true,
+            activation_mode: ActivationMode::Hold,
+            shortcut: Shortcut::parse("Alt + F13").unwrap(),
+            ..Settings::default()
+        };
+        for preset in [PresentationPreset::Slides, PresentationPreset::LiveDemo] {
+            settings.apply_preset(preset);
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap(), settings);
+            settings.diameter = 97;
+            settings.opacity = 31;
+            settings.color_hex = "#123456".into();
+            settings.save(&path).unwrap();
+            assert_eq!(Settings::load(&path).unwrap(), settings);
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
     fn atomic_settings_round_trip_and_corruption() {
         let dir =
             std::env::temp_dir().join(format!("CursorHighlighter.Rust-{}", std::process::id()));
@@ -414,11 +679,15 @@ mod tests {
             enabled: false,
             activation_mode: ActivationMode::Hold,
             shortcut: Shortcut::parse("Alt + Shift + F13").unwrap(),
+            start_minimized: true,
+            scale_with_dpi: true,
+            auto_hide: true,
             ..Settings::default()
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         settings.opacity = 65;
+        settings.scale_with_dpi = false;
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), settings);
         assert!(!path.with_extension("json.tmp").exists());
@@ -426,6 +695,42 @@ mod tests {
         assert!(Settings::load(&path).is_err());
         fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn auto_hide_idle_typing_and_movement() {
+        let mut hide = AutoHide::new(0);
+        assert_eq!(hide.alpha(1499), 255);
+        assert_eq!(hide.alpha(1500), 255);
+        assert_eq!(hide.alpha(1590), 128);
+        assert_eq!(hide.alpha(1680), 0);
+        hide.moved(1680);
+        assert_eq!(hide.alpha(1770), 128);
+        assert_eq!(hide.alpha(1860), 255);
+        hide.typed(1860);
+        assert_eq!(hide.alpha(1950), 128);
+        hide.typed(1950);
+        assert_eq!(hide.alpha(2040), 0);
+        assert_eq!(hide.alpha(10000), 0);
+        hide.moved(10000);
+        assert_eq!(hide.alpha(10180), 255);
+        hide.moved(11000);
+        assert_eq!(hide.alpha(12499), 255);
+        assert_eq!(hide.alpha(12680), 0);
+    }
+
+    #[test]
+    fn auto_hide_events_do_not_apply_past_time_to_new_target() {
+        let mut hide = AutoHide::new(100);
+        hide.typed(1000);
+        assert_eq!(hide.alpha(1000), 255);
+        assert_eq!(hide.alpha(1180), 0);
+        hide.moved(10000);
+        assert_eq!(hide.alpha(10000), 0);
+        assert_eq!(hide.alpha(10180), 255);
+        let mut reset = AutoHide::new(20000);
+        assert_eq!(reset.alpha(21500), 255);
+        assert_eq!(reset.alpha(21680), 0);
     }
 
     #[test]
@@ -459,8 +764,8 @@ mod tests {
                     opacity,
                     ..Settings::default()
                 };
-                let normal = render(&settings, 0.0).unwrap();
-                let pressed = render(&settings, 1.0).unwrap();
+                let normal = render(&settings, 0.0, 96).unwrap();
+                let pressed = render(&settings, 1.0, 96).unwrap();
                 let size = diameter as usize + 4;
                 let center = (size / 2 * size + size / 2) * 4;
                 assert_eq!(normal.len(), size * size * 4);
